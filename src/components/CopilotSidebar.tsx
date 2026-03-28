@@ -22,6 +22,7 @@ interface Props {
   factCheckClaims: string[];
   factCheckResults: FactCheckResult[];
   factCheckError: string | null;
+  factCheckStatus: string | null;
   isFactChecking: boolean;
   onRunFactCheck: () => Promise<void>;
   meetingContext: string;
@@ -47,6 +48,7 @@ export default function CopilotSidebar({
   factCheckClaims,
   factCheckResults,
   factCheckError,
+  factCheckStatus,
   isFactChecking,
   onRunFactCheck,
   meetingContext,
@@ -231,6 +233,7 @@ export default function CopilotSidebar({
               isCapturing={isCapturing}
               isRunning={isFactChecking}
               error={factCheckError}
+              status={factCheckStatus}
               claims={factCheckClaims}
               results={factCheckResults}
               onRun={onRunFactCheck}
