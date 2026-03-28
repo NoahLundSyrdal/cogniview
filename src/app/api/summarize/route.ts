@@ -104,7 +104,7 @@ Merge items that refer to the same deliverable, deadline, or follow-up even if t
 
 export async function POST(req: NextRequest) {
   try {
-    const { insights, actionItems, transcriptSegments, duration } = await req.json();
+    const { insights, actionItems, transcriptSegments, factCheckRuns, duration } = await req.json();
     const rawActionItems = Array.isArray(actionItems)
       ? actionItems
           .filter((item): item is string => typeof item === 'string')
@@ -126,6 +126,7 @@ export async function POST(req: NextRequest) {
         insights: Array.isArray(insights) ? insights : [],
         actionItems: concreteActionItems,
         transcriptSegments: Array.isArray(transcriptSegments) ? transcriptSegments : [],
+        factCheckRuns: Array.isArray(factCheckRuns) ? factCheckRuns : [],
         ...(typeof duration === 'number' && Number.isFinite(duration) && duration > 0
           ? { duration: Math.floor(duration) }
           : {}),
@@ -164,6 +165,50 @@ export async function POST(req: NextRequest) {
       )
       .join('\n');
 
+    const factCheckText = Array.isArray(factCheckRuns)
+      ? factCheckRuns
+          .slice(-4)
+          .map((run, runIndex) => {
+            if (!run || typeof run !== 'object') return '';
+            const candidate = run as {
+              timestamp?: number;
+              results?: Array<{
+                claim?: string;
+                verdict?: string;
+                summary?: string;
+              }>;
+            };
+            const results = Array.isArray(candidate.results)
+              ? candidate.results
+                  .map((result) => {
+                    if (!result || typeof result !== 'object') return '';
+                    const item = result as {
+                      claim?: string;
+                      verdict?: string;
+                      summary?: string;
+                    };
+                    const claim = typeof item.claim === 'string' ? item.claim : '';
+                    const verdict = typeof item.verdict === 'string' ? item.verdict : '';
+                    const summary = typeof item.summary === 'string' ? item.summary : '';
+                    if (!claim || !verdict) return '';
+                    return `- ${claim} (${verdict})${summary ? `: ${summary}` : ''}`;
+                  })
+                  .filter(Boolean)
+              : [];
+
+            if (!results.length) return '';
+
+            const label =
+              typeof candidate.timestamp === 'number'
+                ? `[${new Date(candidate.timestamp).toLocaleTimeString()}]`
+                : `[Run ${runIndex + 1}]`;
+
+            return `${label}\n${results.join('\n')}`;
+          })
+          .filter(Boolean)
+          .join('\n\n')
+      : '';
+
     const userPrompt = `You are writing the final summary for a completed meeting that lasted ${duration || 'unknown'} minutes.
 
 Build one polished final summary that clearly combines:
@@ -177,6 +222,9 @@ ${insightText}
 
 Transcript from the meeting audio:
 ${transcriptText || 'No transcript captured.'}
+
+Fact-check findings captured during the meeting:
+${factCheckText || 'No fact-check findings were captured.'}
 
 Action items / commitments already extracted:
 ${concreteActionItems.map((item, i) => `${i + 1}. ${item}`).join('\n') || 'No explicit action items were pre-identified.'}
@@ -204,6 +252,7 @@ Flat bullet list of unresolved issues or things to clarify.
 
 Rules:
 - Integrate both speech and on-screen activity; do not summarize only one side.
+- If there were fact-check findings, incorporate the most important ones into the recap where relevant.
 - Prefer specifics over generic filler.
 - Only include a todo list when the meeting clearly assigned or committed to follow-up work.
 - Do not invent action items just because the summary has an Action Items section.

@@ -254,6 +254,7 @@ async def fact_check(payload: FactCheckRequest):
             screen_context=payload.screenContext,
             transcript_context=payload.transcriptContext,
             max_claims=payload.maxClaims,
+            mode=payload.mode,
         )
         return response
     except Exception as error:
@@ -267,6 +268,7 @@ async def summarize(payload: MeetingSummaryRequest):
             insights=payload.insights,
             action_items=payload.actionItems,
             transcript_segments=payload.transcriptSegments,
+            fact_check_runs=payload.factCheckRuns,
             duration=payload.duration,
         )
         return MeetingSummaryResponse(summary=summary)

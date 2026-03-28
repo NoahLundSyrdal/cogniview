@@ -77,8 +77,9 @@ export function useScreenCapture({ onFrame, onAudioChunk }: UseScreenCaptureOpti
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioRecorderRef = useRef<MediaRecorder | null>(null);
   const shouldRecordAudioRef = useRef(false);
+  const pendingAudioChunkJobsRef = useRef<Set<Promise<void>>>(new Set());
 
-  const stopCapture = useCallback(() => {
+  const stopCapture = useCallback(async () => {
     if (intervalRef.current) {
       clearInterval(intervalRef.current);
       intervalRef.current = null;
@@ -92,10 +93,30 @@ export function useScreenCapture({ onFrame, onAudioChunk }: UseScreenCaptureOpti
     shouldRecordAudioRef.current = false;
 
     const recorder = audioRecorderRef.current;
+    let recorderStopPromise: Promise<void> | null = null;
     if (recorder && recorder.state !== 'inactive') {
+      recorderStopPromise = new Promise((resolve) => {
+        recorder.addEventListener(
+          'stop',
+          () => {
+            resolve();
+          },
+          { once: true }
+        );
+      });
       recorder.stop();
     }
+
+    if (recorderStopPromise) {
+      await recorderStopPromise;
+    }
+
     audioRecorderRef.current = null;
+
+    const pendingAudioChunkJobs = [...pendingAudioChunkJobsRef.current];
+    if (pendingAudioChunkJobs.length > 0) {
+      await Promise.allSettled(pendingAudioChunkJobs);
+    }
 
     if (audioContextRef.current) {
       void audioContextRef.current.close().catch(() => null);
@@ -216,7 +237,12 @@ export function useScreenCapture({ onFrame, onAudioChunk }: UseScreenCaptureOpti
 
           recorder.ondataavailable = (event) => {
             if (event.data.size >= MIN_AUDIO_CHUNK_BYTES) {
-              void onAudioChunk(event.data);
+              const pendingJob = Promise.resolve(onAudioChunk(event.data))
+                .catch(() => undefined)
+                .finally(() => {
+                  pendingAudioChunkJobsRef.current.delete(pendingJob);
+                });
+              pendingAudioChunkJobsRef.current.add(pendingJob);
             }
           };
 
@@ -238,7 +264,9 @@ export function useScreenCapture({ onFrame, onAudioChunk }: UseScreenCaptureOpti
       }
 
       setIsCapturing(true);
-      displayStream.getVideoTracks()[0].onended = () => stopCapture();
+      displayStream.getVideoTracks()[0].onended = () => {
+        void stopCapture();
+      };
       return true;
     } catch (err) {
       const error = err as DOMException;

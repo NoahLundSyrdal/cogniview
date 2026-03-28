@@ -195,6 +195,7 @@ export async function callRailtracksFactCheck(payload: {
   screenContext?: string;
   transcriptContext?: string;
   maxClaims?: number;
+  mode?: 'background' | 'interactive';
 }): Promise<FactCheckResponsePayload> {
   const data = await postRailtracks<RailtracksFactCheckPayload>('/fact-check', payload);
   const statements = normalizeFactCheckStatements(data?.statements);
@@ -213,6 +214,7 @@ export async function callRailtracksSummary(payload: {
   insights: unknown[];
   actionItems: string[];
   transcriptSegments: unknown[];
+  factCheckRuns?: unknown[];
   duration?: number;
 }): Promise<string> {
   const data = await postRailtracks<RailtracksSummaryPayload>('/summarize', payload);

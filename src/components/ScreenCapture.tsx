@@ -12,7 +12,7 @@ interface Props {
   analysisError: string | null;
   transcriptError: string | null;
   onStart: () => void;
-  onStop: () => void;
+  onStop: () => void | Promise<void>;
 }
 
 export default function ScreenCapture({

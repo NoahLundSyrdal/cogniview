@@ -14,6 +14,9 @@ import type { FactCheckResult, FactCheckStatement, FrameAnalysis } from '@/types
 
 const TRANSCRIPT_ACTION_INTERVAL_MS = 15000;
 const TRANSCRIPT_ACTION_MAX_CHARS = 2000;
+const BACKGROUND_FACTCHECK_DEBOUNCE_MS = 800;
+const BACKGROUND_FACTCHECK_MAX_CLAIMS = 1;
+const FACTCHECK_HISTORY_LIMIT = 6;
 
 const DUPLICATE_INSIGHT_SUMMARY_THRESHOLD = 0.58;
 const DUPLICATE_INSIGHT_LIST_THRESHOLD = 0.5;
@@ -151,6 +154,29 @@ function isNearDuplicateInsight(previous: FrameAnalysis | null, next: FrameAnaly
   );
 }
 
+type FactCheckSnapshot = {
+  key: string;
+  frame: string;
+  transcriptContext: string;
+  mode: 'background' | 'interactive';
+  claims: string[];
+  statements: FactCheckStatement[];
+  results: FactCheckResult[];
+  timestamp: number;
+};
+
+function hashFactCheckInput(frame: string, transcriptContext: string) {
+  const input = `${frame}\u241f${transcriptContext}`;
+  let hash = 2166136261;
+
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+
+  return (hash >>> 0).toString(16);
+}
+
 export default function Home() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
@@ -165,6 +191,7 @@ export default function Home() {
   const [isGeneratingFinalSummary, setIsGeneratingFinalSummary] = useState(false);
   const [shouldGenerateFinalSummary, setShouldGenerateFinalSummary] = useState(false);
   const [isFactChecking, setIsFactChecking] = useState(false);
+  const [activeBackgroundFactCheckJobs, setActiveBackgroundFactCheckJobs] = useState(0);
   const [factCheckError, setFactCheckError] = useState<string | null>(null);
   const [factCheckStatus, setFactCheckStatus] = useState<string | null>(null);
   const [factCheckClaims, setFactCheckClaims] = useState<string[]>([]);
@@ -176,10 +203,17 @@ export default function Home() {
   const transcriptActionQueueRef = useRef<Promise<void>>(Promise.resolve());
   const lastTranscriptActionRunAtRef = useRef(0);
   const lastTranscriptActionInputRef = useRef('');
+  const latestTranscriptContextRef = useRef('');
   const latestFrameRef = useRef<string | null>(null);
-  const lastFactCheckedFrameRef = useRef<string | null>(null);
+  const lastFactCheckedKeyRef = useRef<string | null>(null);
   const pendingFactCheckFrameRef = useRef<string | null>(null);
   const isFactCheckingRef = useRef(false);
+  const isCapturingRef = useRef(false);
+  const backgroundFactCheckTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const backgroundFactCheckKeyRef = useRef<string | null>(null);
+  const backgroundFactCheckPromiseRef = useRef<Promise<FactCheckSnapshot | null> | null>(null);
+  const cachedFactCheckSnapshotRef = useRef<FactCheckSnapshot | null>(null);
+  const factCheckHistoryRef = useRef<FactCheckSnapshot[]>([]);
   const meetingSessionIdRef = useRef(0);
   const {
     isOpen: isSidebarDetached,
@@ -217,6 +251,10 @@ export default function Home() {
     insightsRef.current = insights;
   }, [insights]);
 
+  useEffect(() => {
+    latestTranscriptContextRef.current = getTranscriptSummary();
+  }, [getTranscriptSummary, transcriptSegments]);
+
   const generateFinalSummary = useCallback(
     async (sessionId: number) => {
       if (!hasMeetingData) {
@@ -235,6 +273,12 @@ export default function Home() {
             insights,
             actionItems: allActionItems,
             transcriptSegments,
+            factCheckRuns: factCheckHistoryRef.current.map((item) => ({
+              timestamp: item.timestamp,
+              claims: item.claims,
+              statements: item.statements,
+              results: item.results,
+            })),
             duration,
           }),
         });
@@ -273,54 +317,213 @@ export default function Home() {
     setShouldGenerateFinalSummary(true);
   }, [hasMeetingData]);
 
-  const runFactCheckForFrame = useCallback(
-    async (frame: string) => {
-      pendingFactCheckFrameRef.current = null;
-      setFactCheckStatus(null);
-      setFactCheckError(null);
-      setIsFactChecking(true);
-      isFactCheckingRef.current = true;
+  const buildFactCheckRequest = useCallback(
+    (
+      frame: string,
+      options: {
+        maxClaims?: number;
+        mode?: 'background' | 'interactive';
+      } = {}
+    ) => {
+      const transcriptContext = getTranscriptSummary();
+      const payload = {
+        frame,
+        meetingContext: getContextSummary(),
+        screenContext: getScreenSummary(),
+        transcriptContext,
+        mode: options.mode ?? 'interactive',
+        ...(typeof options.maxClaims === 'number' ? { maxClaims: options.maxClaims } : {}),
+      };
 
-      try {
-        const res = await fetch('/api/fact-check', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            frame,
-            meetingContext: getContextSummary(),
-            screenContext: getScreenSummary(),
-            transcriptContext: getTranscriptSummary(),
-          }),
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          setFactCheckError(data.error || 'Fact-check failed');
-          return;
-        }
-        lastFactCheckedFrameRef.current = frame;
-        setFactCheckClaims(Array.isArray(data.claims) ? data.claims : []);
-        setFactCheckStatements(Array.isArray(data.statements) ? data.statements : []);
-        setFactCheckResults(Array.isArray(data.results) ? data.results : []);
-      } catch (err) {
-        console.error('Fact-check failed:', err);
-        setFactCheckError('Network error. Please try again.');
-      } finally {
-        setIsFactChecking(false);
-        isFactCheckingRef.current = false;
-      }
+      return {
+        key: hashFactCheckInput(frame, transcriptContext),
+        payload,
+      };
     },
     [getContextSummary, getScreenSummary, getTranscriptSummary]
   );
 
+  const storeFactCheckSnapshot = useCallback((snapshot: FactCheckSnapshot) => {
+    const existingSnapshot = factCheckHistoryRef.current.find((item) => item.key === snapshot.key);
+    if (existingSnapshot?.mode === 'interactive' && snapshot.mode === 'background') {
+      cachedFactCheckSnapshotRef.current = existingSnapshot;
+      return;
+    }
+
+    cachedFactCheckSnapshotRef.current = snapshot;
+    factCheckHistoryRef.current = [
+      snapshot,
+      ...factCheckHistoryRef.current.filter((item) => item.key !== snapshot.key),
+    ].slice(0, FACTCHECK_HISTORY_LIMIT);
+  }, []);
+
+  const applyFactCheckSnapshot = useCallback(
+    (
+      snapshot: FactCheckSnapshot,
+      options: {
+        status?: string | null;
+        markAsChecked?: boolean;
+      } = {}
+    ) => {
+      setFactCheckError(null);
+      setFactCheckClaims(snapshot.claims);
+      setFactCheckStatements(snapshot.statements);
+      setFactCheckResults(snapshot.results);
+      setFactCheckStatus(options.status ?? null);
+
+      if (options.markAsChecked !== false) {
+        lastFactCheckedKeyRef.current = snapshot.key;
+      }
+    },
+    []
+  );
+
+  const executeFactCheck = useCallback(
+    async ({
+      frame,
+      background = false,
+      maxClaims,
+      keepExistingResults = false,
+      statusMessage,
+    }: {
+      frame: string;
+      background?: boolean;
+      maxClaims?: number;
+      keepExistingResults?: boolean;
+      statusMessage?: string | null;
+    }): Promise<FactCheckSnapshot | null> => {
+      const { key, payload } = buildFactCheckRequest(frame, {
+        maxClaims,
+        mode: background ? 'background' : 'interactive',
+      });
+      let task: Promise<FactCheckSnapshot | null> | null = null;
+
+      if (background) {
+        backgroundFactCheckKeyRef.current = key;
+        setActiveBackgroundFactCheckJobs((count) => count + 1);
+      } else {
+        pendingFactCheckFrameRef.current = null;
+        setFactCheckStatus(statusMessage ?? null);
+        setFactCheckError(null);
+        if (!keepExistingResults) {
+          setFactCheckClaims([]);
+          setFactCheckStatements([]);
+          setFactCheckResults([]);
+        }
+        setIsFactChecking(true);
+        isFactCheckingRef.current = true;
+      }
+
+      task = (async () => {
+        try {
+          const res = await fetch('/api/fact-check', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          const data = await res.json();
+          if (!res.ok) {
+            if (!background) {
+              setFactCheckError(data.error || 'Fact-check failed');
+            }
+            return null;
+          }
+
+          const snapshot: FactCheckSnapshot = {
+            key,
+            frame,
+            transcriptContext: payload.transcriptContext,
+            mode: payload.mode,
+            claims: Array.isArray(data.claims) ? data.claims : [],
+            statements: Array.isArray(data.statements) ? data.statements : [],
+            results: Array.isArray(data.results) ? data.results : [],
+            timestamp: Date.now(),
+          };
+
+          storeFactCheckSnapshot(snapshot);
+
+          const currentKey = latestFrameRef.current
+            ? hashFactCheckInput(latestFrameRef.current, latestTranscriptContextRef.current)
+            : null;
+
+          if (!background || currentKey === snapshot.key) {
+            applyFactCheckSnapshot(snapshot, {
+              status: background
+                ? snapshot.results.length > 0 || snapshot.claims.length > 0
+                  ? 'Background fact-check is ready for the current screen and recent speech.'
+                  : 'Background fact-check did not find a high-priority claim yet.'
+                : null,
+            });
+          }
+
+          return snapshot;
+        } catch (err) {
+          console.error(background ? 'Background fact-check failed:' : 'Fact-check failed:', err);
+          if (!background) {
+            setFactCheckError('Network error. Please try again.');
+          }
+          return null;
+        } finally {
+          if (background) {
+            setActiveBackgroundFactCheckJobs((count) => Math.max(0, count - 1));
+            if (backgroundFactCheckKeyRef.current === key) {
+              backgroundFactCheckKeyRef.current = null;
+            }
+            if (task && backgroundFactCheckPromiseRef.current === task) {
+              backgroundFactCheckPromiseRef.current = null;
+            }
+          } else {
+            setIsFactChecking(false);
+            isFactCheckingRef.current = false;
+          }
+        }
+      })();
+
+      if (background && task) {
+        backgroundFactCheckPromiseRef.current = task;
+      }
+
+      return task;
+    },
+    [applyFactCheckSnapshot, buildFactCheckRequest, storeFactCheckSnapshot]
+  );
+
+  const scheduleBackgroundFactCheck = useCallback(() => {
+    if (!isCapturingRef.current || isFactCheckingRef.current) return;
+    if (backgroundFactCheckTimerRef.current) {
+      clearTimeout(backgroundFactCheckTimerRef.current);
+    }
+
+    backgroundFactCheckTimerRef.current = setTimeout(() => {
+      backgroundFactCheckTimerRef.current = null;
+      const frame = latestFrameRef.current;
+      if (!frame || isFactCheckingRef.current) return;
+
+      const { key } = buildFactCheckRequest(frame, {
+        maxClaims: BACKGROUND_FACTCHECK_MAX_CLAIMS,
+        mode: 'background',
+      });
+      if (cachedFactCheckSnapshotRef.current?.key === key) return;
+      if (backgroundFactCheckKeyRef.current === key) return;
+
+      void executeFactCheck({
+        frame,
+        background: true,
+        maxClaims: BACKGROUND_FACTCHECK_MAX_CLAIMS,
+      });
+    }, BACKGROUND_FACTCHECK_DEBOUNCE_MS);
+  }, [buildFactCheckRequest, executeFactCheck]);
+
   const handleFrame = useCallback(
     async (frame: string) => {
       latestFrameRef.current = frame;
+      scheduleBackgroundFactCheck();
       if (
         pendingFactCheckFrameRef.current &&
         frame !== pendingFactCheckFrameRef.current &&
         !isFactCheckingRef.current
       ) {
-        void runFactCheckForFrame(frame);
+        void executeFactCheck({ frame });
       }
       setIsAnalyzing(true);
       setAnalysisError(null);
@@ -362,7 +565,7 @@ export default function Home() {
       }
       setIsAnalyzing(false);
     },
-    [context, addInsight, getTranscriptSummary, runFactCheckForFrame]
+    [context, addInsight, executeFactCheck, getTranscriptSummary, scheduleBackgroundFactCheck]
   );
 
   const handleAudioChunk = useCallback(
@@ -448,6 +651,11 @@ export default function Home() {
     onFrame: handleFrame,
     onAudioChunk: handleAudioChunk,
   });
+
+  useEffect(() => {
+    isCapturingRef.current = isCapturing;
+  }, [isCapturing]);
+
   const showMainScreenSummary =
     !isCapturing &&
     hasMeetingData &&
@@ -455,7 +663,13 @@ export default function Home() {
 
   useEffect(() => {
     if (!shouldGenerateFinalSummary) return;
-    if (isCapturing || isAnalyzing || activeTranscriptJobs > 0 || activeTranscriptActionJobs > 0) {
+    if (
+      isCapturing ||
+      isAnalyzing ||
+      activeTranscriptJobs > 0 ||
+      activeTranscriptActionJobs > 0 ||
+      activeBackgroundFactCheckJobs > 0
+    ) {
       return;
     }
 
@@ -463,6 +677,7 @@ export default function Home() {
     setShouldGenerateFinalSummary(false);
     void generateFinalSummary(sessionId);
   }, [
+    activeBackgroundFactCheckJobs,
     activeTranscriptActionJobs,
     activeTranscriptJobs,
     generateFinalSummary,
@@ -475,6 +690,11 @@ export default function Home() {
     if (!isCapturing || transcriptSegments.length === 0) return;
     void extractCommitmentsFromTranscript();
   }, [extractCommitmentsFromTranscript, isCapturing, transcriptSegments]);
+
+  useEffect(() => {
+    if (!isCapturing || !latestFrameRef.current) return;
+    scheduleBackgroundFactCheck();
+  }, [isCapturing, scheduleBackgroundFactCheck, transcriptSegments]);
 
   const handleStart = useCallback(async () => {
     meetingSessionIdRef.current += 1;
@@ -495,10 +715,12 @@ export default function Home() {
     setFinalSummaryError(null);
     setIsGeneratingFinalSummary(false);
     setShouldGenerateFinalSummary(false);
+    setActiveBackgroundFactCheckJobs(0);
     transcriptQueueRef.current = Promise.resolve();
     transcriptActionQueueRef.current = Promise.resolve();
     lastTranscriptActionRunAtRef.current = 0;
     lastTranscriptActionInputRef.current = '';
+    latestTranscriptContextRef.current = '';
     latestFrameRef.current = null;
     latestAnalysisRef.current = null;
     setFactCheckError(null);
@@ -506,7 +728,15 @@ export default function Home() {
     setFactCheckClaims([]);
     setFactCheckStatements([]);
     setFactCheckResults([]);
-    lastFactCheckedFrameRef.current = null;
+    if (backgroundFactCheckTimerRef.current) {
+      clearTimeout(backgroundFactCheckTimerRef.current);
+      backgroundFactCheckTimerRef.current = null;
+    }
+    backgroundFactCheckKeyRef.current = null;
+    backgroundFactCheckPromiseRef.current = null;
+    cachedFactCheckSnapshotRef.current = null;
+    factCheckHistoryRef.current = [];
+    lastFactCheckedKeyRef.current = null;
     pendingFactCheckFrameRef.current = null;
     isFactCheckingRef.current = false;
     const didStart = await startCapture();
@@ -521,12 +751,35 @@ export default function Home() {
     setStartTime(Date.now());
   }, [closeSidebarWindow, openSidebarWindow, reset, startCapture]);
 
-  const handleStop = useCallback(() => {
+  const handleStop = useCallback(async () => {
     pendingFactCheckFrameRef.current = null;
     setFactCheckStatus(null);
-    stopCapture();
+    await stopCapture();
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => resolve());
+    });
+    if (backgroundFactCheckTimerRef.current) {
+      clearTimeout(backgroundFactCheckTimerRef.current);
+      backgroundFactCheckTimerRef.current = null;
+    }
+    const latestFrame = latestFrameRef.current;
+    if (latestFrame) {
+      const { key } = buildFactCheckRequest(latestFrame, {
+        maxClaims: BACKGROUND_FACTCHECK_MAX_CLAIMS,
+        mode: 'background',
+      });
+      if (backgroundFactCheckKeyRef.current === key && backgroundFactCheckPromiseRef.current) {
+        await backgroundFactCheckPromiseRef.current;
+      } else if (cachedFactCheckSnapshotRef.current?.key !== key) {
+        await executeFactCheck({
+          frame: latestFrame,
+          background: true,
+          maxClaims: BACKGROUND_FACTCHECK_MAX_CLAIMS,
+        });
+      }
+    }
     requestFinalSummary();
-  }, [requestFinalSummary, stopCapture]);
+  }, [buildFactCheckRequest, executeFactCheck, requestFinalSummary, stopCapture]);
 
   const handleRunFactCheck = useCallback(async () => {
     const latestFrame = latestFrameRef.current;
@@ -536,17 +789,56 @@ export default function Home() {
       return;
     }
 
-    if (latestFrame === lastFactCheckedFrameRef.current) {
+    const { key } = buildFactCheckRequest(latestFrame);
+    const cachedSnapshot = cachedFactCheckSnapshotRef.current;
+
+    if (cachedSnapshot?.key === key) {
+      applyFactCheckSnapshot(cachedSnapshot, {
+        status:
+          cachedSnapshot.mode === 'background'
+            ? 'Showing the background fact-check already prepared for the current screen.'
+            : 'Showing the latest fact-check already prepared for the current screen.',
+      });
+      if (cachedSnapshot.mode === 'background') {
+        void executeFactCheck({
+          frame: latestFrame,
+          keepExistingResults: true,
+          statusMessage: 'Deepening the background fact-check with more evidence...',
+        });
+      }
+      return;
+    }
+
+    if (backgroundFactCheckKeyRef.current === key && backgroundFactCheckPromiseRef.current) {
+      setFactCheckError(null);
+      setFactCheckStatus('Background fact-check is already running for the current screen.');
+      setIsFactChecking(true);
+      isFactCheckingRef.current = true;
+      try {
+        const snapshot = await backgroundFactCheckPromiseRef.current;
+        if (snapshot?.key === key) {
+          applyFactCheckSnapshot(snapshot, {
+            status: 'Background fact-check finished for the current screen.',
+          });
+        }
+      } finally {
+        setIsFactChecking(false);
+        isFactCheckingRef.current = false;
+      }
+      return;
+    }
+
+    if (key === lastFactCheckedKeyRef.current) {
       pendingFactCheckFrameRef.current = latestFrame;
       setFactCheckError(null);
       setFactCheckStatus(
-        'Screen is unchanged. Waiting for a new screen before running fact-check again.'
+        'The current screen and recent speech are unchanged. Waiting for new screen content or a new spoken claim before rerunning fact-check.'
       );
       return;
     }
 
-    await runFactCheckForFrame(latestFrame);
-  }, [runFactCheckForFrame]);
+    await executeFactCheck({ frame: latestFrame });
+  }, [applyFactCheckSnapshot, buildFactCheckRequest, executeFactCheck]);
 
   const sidebarProps = {
     insights,
