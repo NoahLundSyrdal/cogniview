@@ -34,3 +34,21 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+
+## Environment Configuration
+
+Copy `.env.example` to `.env` and fill in keys for the provider(s) you want to use.
+
+### Core LLM settings
+
+- `ANTHROPIC_API_KEY` - Anthropic API key for chat/vision/summarize when Anthropic is selected.
+- `OPENAI_API_KEY` - OpenAI API key for chat/vision/summarize and required for fact-checking.
+- `LLM_PROVIDER` - optional override: `anthropic` or `openai`.
+- `ANTHROPIC_MODEL` - optional text/vision model override for Anthropic (default in code: `claude-sonnet-4-6`).
+- `OPENAI_MODEL` - optional text/vision model override for OpenAI (default in code: `gpt-4o`).
+
+### Fact-checking settings
+
+- `OPENAI_FACTCHECK_IMAGE_MODEL` - model used for image-to-claim extraction (default: `gpt-5.4`).
+- `OPENAI_FACTCHECK_REASONING_MODEL` - model used for web-grounded claim verification (default: `gpt-5.4`).
+- `FACTCHECK_MAX_CLAIMS` - max claims extracted per run (default: `5`).

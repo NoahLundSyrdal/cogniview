@@ -7,7 +7,8 @@ import { Button } from '@/components/ui/button';
 import InsightCard from './InsightCard';
 import ActionItems from './ActionItems';
 import MeetingControls from './MeetingControls';
-import type { FrameAnalysis, ChatMessage, TranscriptSegment } from '@/types';
+import FactCheckPanel from './FactCheckPanel';
+import type { FrameAnalysis, ChatMessage, FactCheckResult, TranscriptSegment } from '@/types';
 
 interface Props {
   insights: FrameAnalysis[];
@@ -19,9 +20,14 @@ interface Props {
   transcriptSegments: TranscriptSegment[];
   onSendMessage: (msg: string) => Promise<void>;
   startTime: number | null;
+  factCheckClaims: string[];
+  factCheckResults: FactCheckResult[];
+  factCheckError: string | null;
+  isFactChecking: boolean;
+  onRunFactCheck: () => Promise<void>;
 }
 
-type Tab = 'insights' | 'transcript' | 'actions' | 'chat';
+type Tab = 'insights' | 'transcript' | 'actions' | 'chat' | 'factCheck';
 
 export default function CopilotSidebar({
   insights,
@@ -33,6 +39,11 @@ export default function CopilotSidebar({
   transcriptSegments,
   onSendMessage,
   startTime,
+  factCheckClaims,
+  factCheckResults,
+  factCheckError,
+  isFactChecking,
+  onRunFactCheck,
 }: Props) {
   const [tab, setTab] = useState<Tab>('insights');
   const [input, setInput] = useState('');
@@ -66,6 +77,7 @@ export default function CopilotSidebar({
     { id: 'transcript', label: 'Transcript', count: transcriptSegments.length || undefined },
     { id: 'actions', label: 'Actions', count: allActionItems.length || undefined },
     { id: 'chat', label: 'Chat', count: messages.length || undefined },
+    { id: 'factCheck', label: 'Fact-check', count: factCheckResults.length || undefined },
   ];
 
   return (
@@ -269,6 +281,19 @@ export default function CopilotSidebar({
               </Button>
             </div>
           </div>
+        )}
+
+        {tab === 'factCheck' && (
+          <ScrollArea className="h-full">
+            <FactCheckPanel
+              isCapturing={isCapturing}
+              isRunning={isFactChecking}
+              error={factCheckError}
+              claims={factCheckClaims}
+              results={factCheckResults}
+              onRun={onRunFactCheck}
+            />
+          </ScrollArea>
         )}
       </div>
     </div>
