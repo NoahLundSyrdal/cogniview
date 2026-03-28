@@ -15,6 +15,8 @@ export default function Home() {
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [transcriptError, setTranscriptError] = useState<string | null>(null);
   const [activeTranscriptJobs, setActiveTranscriptJobs] = useState(0);
+  const [assistantChatMessageCount, setAssistantChatMessageCount] = useState(0);
+  const [chatSessionId, setChatSessionId] = useState(() => crypto.randomUUID());
   const [startTime, setStartTime] = useState<number | null>(null);
   const [isFactChecking, setIsFactChecking] = useState(false);
   const [factCheckError, setFactCheckError] = useState<string | null>(null);
@@ -42,12 +44,10 @@ export default function Home() {
 
   const {
     insights,
-    messages,
     context,
     allActionItems,
     transcriptSegments,
     addInsight,
-    addMessage,
     addTranscriptSegment,
     getTranscriptSummary,
     getContextSummary,
@@ -148,6 +148,8 @@ export default function Home() {
     setAnalysisError(null);
     setTranscriptError(null);
     setActiveTranscriptJobs(0);
+    setAssistantChatMessageCount(0);
+    setChatSessionId(crypto.randomUUID());
     transcriptQueueRef.current = Promise.resolve();
     latestFrameRef.current = null;
     setFactCheckError(null);
@@ -202,49 +204,25 @@ export default function Home() {
     }
   }, [getContextSummary]);
 
-  const handleSendMessage = useCallback(
-    async (message: string) => {
-      addMessage({ role: 'user', content: message });
-      try {
-        const res = await fetch('/api/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            message,
-            meetingContext: getContextSummary(),
-            screenAnalysis: latestAnalysisRef.current,
-            transcriptContext: getTranscriptSummary(),
-          }),
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          addMessage({ role: 'assistant', content: `Error: ${data.error || 'Chat failed'}` });
-        } else {
-          addMessage({ role: 'assistant', content: data.response });
-        }
-      } catch (err) {
-        console.error('Chat failed:', err);
-        addMessage({ role: 'assistant', content: 'Network error. Please try again.' });
-      }
-    },
-    [addMessage, getContextSummary, getTranscriptSummary]
-  );
-
   const sidebarProps = {
     insights,
-    messages,
+    chatMessageCount: assistantChatMessageCount,
     isCapturing,
     isAnalyzing: isAnalyzing || activeTranscriptJobs > 0,
     isTranscribing: activeTranscriptJobs > 0,
     allActionItems,
     transcriptSegments,
-    onSendMessage: handleSendMessage,
     startTime,
     factCheckClaims,
     factCheckResults,
     factCheckError,
     isFactChecking,
     onRunFactCheck: handleRunFactCheck,
+    meetingContext: getContextSummary(),
+    screenAnalysis: latestAnalysisRef.current,
+    transcriptContext: getTranscriptSummary(),
+    chatSessionId,
+    onChatMessageCountChange: setAssistantChatMessageCount,
   };
 
   return (
@@ -281,7 +259,7 @@ export default function Home() {
                 { label: 'Frames analyzed', value: insights.length },
                 { label: 'Transcripts', value: transcriptSegments.length },
                 { label: 'Action items', value: allActionItems.length },
-                { label: 'Messages', value: messages.length },
+                { label: 'Messages', value: assistantChatMessageCount },
               ].map(({ label, value }) => (
                 <div key={label} className="flex flex-col gap-0.5">
                   <span className="text-2xl font-bold text-indigo-300">{value}</span>
@@ -296,6 +274,8 @@ export default function Home() {
             <span className="text-gray-500">Gemini Vision</span>
             <span>+</span>
             <span className="text-gray-500">Claude AI</span>
+            <span>+</span>
+            <span className="text-gray-500">Assistant UI</span>
           </div>
         </div>
 
