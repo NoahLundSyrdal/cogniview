@@ -8,13 +8,18 @@ import { useDetachedWindow } from '@/hooks/useDetachedWindow';
 import { useMeetingContext } from '@/hooks/useMeetingContext';
 import ScreenCapture from '@/components/ScreenCapture';
 import CopilotSidebar from '@/components/CopilotSidebar';
-import type { FrameAnalysis } from '@/types';
+import type { FrameAnalysis, FactCheckResult } from '@/types';
 
 export default function Home() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [startTime, setStartTime] = useState<number | null>(null);
+  const [isFactChecking, setIsFactChecking] = useState(false);
+  const [factCheckError, setFactCheckError] = useState<string | null>(null);
+  const [factCheckClaims, setFactCheckClaims] = useState<string[]>([]);
+  const [factCheckResults, setFactCheckResults] = useState<FactCheckResult[]>([]);
   const latestAnalysisRef = useRef<FrameAnalysis | null>(null);
+  const latestFrameRef = useRef<string | null>(null);
   const {
     isOpen: isSidebarDetached,
     mode: detachedSidebarMode,
@@ -45,6 +50,7 @@ export default function Home() {
 
   const handleFrame = useCallback(
     async (frame: string) => {
+      latestFrameRef.current = frame;
       setIsAnalyzing(true);
       setAnalysisError(null);
       try {
@@ -81,6 +87,10 @@ export default function Home() {
     reset();
     setStartTime(null);
     setAnalysisError(null);
+    latestFrameRef.current = null;
+    setFactCheckError(null);
+    setFactCheckClaims([]);
+    setFactCheckResults([]);
     const didStart = await startCapture();
 
     if (!didStart) {
@@ -96,6 +106,39 @@ export default function Home() {
   const handleStop = useCallback(() => {
     stopCapture();
   }, [stopCapture]);
+
+  const handleRunFactCheck = useCallback(async () => {
+    const latestFrame = latestFrameRef.current;
+    if (!latestFrame) {
+      setFactCheckError('No captured frame available yet.');
+      return;
+    }
+
+    setFactCheckError(null);
+    setIsFactChecking(true);
+    try {
+      const res = await fetch('/api/fact-check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          frame: latestFrame,
+          meetingContext: getContextSummary(),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setFactCheckError(data.error || 'Fact-check failed');
+        return;
+      }
+      setFactCheckClaims(Array.isArray(data.claims) ? data.claims : []);
+      setFactCheckResults(Array.isArray(data.results) ? data.results : []);
+    } catch (err) {
+      console.error('Fact-check failed:', err);
+      setFactCheckError('Network error. Please try again.');
+    } finally {
+      setIsFactChecking(false);
+    }
+  }, [getContextSummary]);
 
   const handleSendMessage = useCallback(
     async (message: string) => {
@@ -132,6 +175,11 @@ export default function Home() {
     allActionItems,
     onSendMessage: handleSendMessage,
     startTime,
+    factCheckClaims,
+    factCheckResults,
+    factCheckError,
+    isFactChecking,
+    onRunFactCheck: handleRunFactCheck,
   };
 
   return (

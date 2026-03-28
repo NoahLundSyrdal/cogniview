@@ -24,3 +24,23 @@ export interface MeetingState {
   context: string;
   allActionItems: string[];
 }
+
+export type FactCheckVerdict = 'supported' | 'contradicted' | 'mixed' | 'insufficient_evidence';
+
+export interface FactCheckClaim {
+  claim: string;
+}
+
+export interface FactCheckSource {
+  title: string;
+  url: string;
+  snippet: string;
+}
+
+export interface FactCheckResult {
+  claim: string;
+  verdict: FactCheckVerdict;
+  confidence: number;
+  summary: string;
+  sources: FactCheckSource[];
+}
