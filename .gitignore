@@ -23,6 +23,9 @@
 # misc
 .DS_Store
 *.pem
+__pycache__/
+.venv/
+.railtracks/
 
 # debug
 npm-debug.log*
