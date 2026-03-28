@@ -38,6 +38,8 @@ Analyze the current screen and respond with ONLY valid JSON (no markdown, no cod
 
 Rules:
 - Be concise. Focus on what's NEW or IMPORTANT.
+- Prioritize delta wording: if this frame is the same topic as the prior frame, summarize only what changed.
+- Avoid repeating the same opening sentence from the previous insight when content is largely unchanged.
 - keyPoints should have 1-3 items max.
 - suggestedQuestions should have 0-2 items.
 - actionItems should only include real tasks/todos.
@@ -51,6 +53,7 @@ Rules:
 - When the screen clearly contains actionable work, prefer actionItems over suggestedQuestions.
 - factCheckFlags only for specific claims with numbers or controversial statements.
 - sceneSignature should stay the same if the screen is materially the same content with only minor scrolling or layout shifts.
+- Reuse the previous sceneSignature when topic is unchanged.
 - If screen appears unchanged from context, note that briefly.`;
 
     const text = await completeVision({

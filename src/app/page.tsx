@@ -21,6 +21,11 @@ const DUPLICATE_INSIGHT_COMBINED_THRESHOLD = 0.64;
 const DUPLICATE_INSIGHT_MEDIUM_THRESHOLD = 0.42;
 const DUPLICATE_INSIGHT_WINDOW_MS = 45000;
 const DUPLICATE_INSIGHT_RECENT_LIMIT = 6;
+const DUPLICATE_INSIGHT_TOPIC_LIMIT = 18;
+const DUPLICATE_INSIGHT_SIGNATURE_THRESHOLD = 0.55;
+const DUPLICATE_INSIGHT_SUMMARY_TOPIC_THRESHOLD = 0.52;
+const DUPLICATE_INSIGHT_PREFIX_WORDS = 14;
+const DUPLICATE_INSIGHT_NOVELTY_THRESHOLD = 0.24;
 const DOMAIN_RE = /\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b/gi;
 const QUOTED_TEXT_RE = /["'“”‘’]([^"'“”‘’]{8,160})["'“”‘’]/g;
 
@@ -40,6 +45,37 @@ function normalizeInsightText(text: string) {
 function tokenizeInsightText(text: string) {
   const normalized = normalizeInsightText(text);
   return normalized ? normalized.split(' ') : [];
+}
+
+function toWordPrefix(text: string, maxWords = DUPLICATE_INSIGHT_PREFIX_WORDS) {
+  return normalizeInsightText(text)
+    .split(' ')
+    .filter(Boolean)
+    .slice(0, maxWords)
+    .join(' ');
+}
+
+function toFirstSentence(text: string) {
+  const sentence = text.split(/[.!?]/)[0] || '';
+  return normalizeInsightText(sentence);
+}
+
+function hasRepeatedSummaryLead(previousSummary: string, nextSummary: string) {
+  const previousSentence = toFirstSentence(previousSummary);
+  const nextSentence = toFirstSentence(nextSummary);
+  if (previousSentence && nextSentence) {
+    if (previousSentence === nextSentence) return true;
+    if (previousSentence.includes(nextSentence) || nextSentence.includes(previousSentence)) {
+      const minLength = Math.min(previousSentence.length, nextSentence.length);
+      if (minLength >= 20) return true;
+    }
+  }
+
+  const previousPrefix = toWordPrefix(previousSummary);
+  const nextPrefix = toWordPrefix(nextSummary);
+  if (!previousPrefix || !nextPrefix) return false;
+  if (previousPrefix === nextPrefix) return true;
+  return previousPrefix.includes(nextPrefix) || nextPrefix.includes(previousPrefix);
 }
 
 function buildInsightCombinedText(analysis: FrameAnalysis) {
@@ -111,6 +147,60 @@ function listSimilarity(left: string[], right: string[]) {
   return jaccardSimilarity(leftTokens, rightTokens);
 }
 
+function signatureSimilarity(left: string | undefined, right: string | undefined) {
+  const leftTokens = tokenizeInsightText(left || '');
+  const rightTokens = tokenizeInsightText(right || '');
+  if (!leftTokens.length || !rightTokens.length) return 0;
+  return jaccardSimilarity(leftTokens, rightTokens);
+}
+
+function isSameInsightTopic(previous: FrameAnalysis, next: FrameAnalysis) {
+  if (previous.screenType !== next.screenType) return false;
+
+  const signatureScore = signatureSimilarity(previous.sceneSignature, next.sceneSignature);
+  if (signatureScore >= DUPLICATE_INSIGHT_SIGNATURE_THRESHOLD) {
+    return true;
+  }
+
+  const summaryScore = jaccardSimilarity(
+    tokenizeInsightText(previous.summary),
+    tokenizeInsightText(next.summary)
+  );
+  return summaryScore >= DUPLICATE_INSIGHT_SUMMARY_TOPIC_THRESHOLD;
+}
+
+function summaryNoveltyScore(nextSummary: string, previousInsights: FrameAnalysis[]) {
+  const nextTokens = new Set(tokenizeInsightText(nextSummary));
+  if (nextTokens.size === 0) return 0;
+
+  const previousTokenSet = new Set<string>();
+  for (const insight of previousInsights) {
+    for (const token of tokenizeInsightText(insight.summary)) {
+      previousTokenSet.add(token);
+    }
+  }
+
+  let novelTokens = 0;
+  for (const token of nextTokens) {
+    if (!previousTokenSet.has(token)) {
+      novelTokens += 1;
+    }
+  }
+
+  return novelTokens / nextTokens.size;
+}
+
+function buildPreviousInsightContext(insight: FrameAnalysis | null) {
+  if (!insight) return '';
+
+  const signature = insight.sceneSignature?.trim() || 'none';
+  return [
+    'Latest accepted insight:',
+    `- Previous sceneSignature: ${signature}`,
+    `- Previous summary: ${insight.summary}`,
+  ].join('\n');
+}
+
 function isNearDuplicateInsight(previous: FrameAnalysis | null, next: FrameAnalysis) {
   if (!previous) return false;
   if (previous.screenType !== next.screenType) return false;
@@ -170,6 +260,7 @@ export default function Home() {
   const [factCheckClaims, setFactCheckClaims] = useState<string[]>([]);
   const [factCheckStatements, setFactCheckStatements] = useState<FactCheckStatement[]>([]);
   const [factCheckResults, setFactCheckResults] = useState<FactCheckResult[]>([]);
+  const [insightStats, setInsightStats] = useState({ accepted: 0, deduped: 0 });
   const insightsRef = useRef<FrameAnalysis[]>([]);
   const latestAnalysisRef = useRef<FrameAnalysis | null>(null);
   const transcriptQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -216,6 +307,15 @@ export default function Home() {
   useEffect(() => {
     insightsRef.current = insights;
   }, [insights]);
+
+  useEffect(() => {
+    if (process.env.NODE_ENV !== 'development') return;
+    console.debug(
+      '[insights] accepted=%d deduped=%d',
+      insightStats.accepted,
+      insightStats.deduped
+    );
+  }, [insightStats.accepted, insightStats.deduped]);
 
   const generateFinalSummary = useCallback(
     async (sessionId: number) => {
@@ -325,6 +425,9 @@ export default function Home() {
       setIsAnalyzing(true);
       setAnalysisError(null);
       const transcriptSummary = getTranscriptSummary();
+      const previousInsightContext = buildPreviousInsightContext(
+        insightsRef.current[insightsRef.current.length - 1] || null
+      );
 
       try {
         const res = await fetch('/api/analyze-frame', {
@@ -332,7 +435,11 @@ export default function Home() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             frame,
-            previousContext: [context, transcriptSummary && `Recent transcript:\n${transcriptSummary}`]
+            previousContext: [
+              context,
+              previousInsightContext,
+              transcriptSummary && `Recent transcript:\n${transcriptSummary}`,
+            ]
               .filter(Boolean)
               .join('\n\n'),
           }),
@@ -349,12 +456,35 @@ export default function Home() {
           };
           const recentInsights = insightsRef.current
             .filter((item) => analysis.timestamp - item.timestamp <= DUPLICATE_INSIGHT_WINDOW_MS)
-            .slice(-DUPLICATE_INSIGHT_RECENT_LIMIT);
-          if (recentInsights.some((item) => isNearDuplicateInsight(item, analysis))) {
+            .slice(-DUPLICATE_INSIGHT_TOPIC_LIMIT);
+          const topicInsights = recentInsights.filter((item) => isSameInsightTopic(item, analysis));
+          const duplicateCandidates =
+            topicInsights.length > 0
+              ? topicInsights
+              : recentInsights.slice(-DUPLICATE_INSIGHT_RECENT_LIMIT);
+          if (
+            duplicateCandidates.some((item) => hasRepeatedSummaryLead(item.summary, analysis.summary))
+          ) {
+            setInsightStats((prev) => ({ ...prev, deduped: prev.deduped + 1 }));
+            return;
+          }
+          const noveltyScore = summaryNoveltyScore(analysis.summary, duplicateCandidates);
+          if (
+            duplicateCandidates.length > 0 &&
+            noveltyScore < DUPLICATE_INSIGHT_NOVELTY_THRESHOLD &&
+            analysis.actionItems.length === 0 &&
+            analysis.factCheckFlags.length === 0
+          ) {
+            setInsightStats((prev) => ({ ...prev, deduped: prev.deduped + 1 }));
+            return;
+          }
+          if (duplicateCandidates.some((item) => isNearDuplicateInsight(item, analysis))) {
+            setInsightStats((prev) => ({ ...prev, deduped: prev.deduped + 1 }));
             return;
           }
           addInsight(analysis);
           latestAnalysisRef.current = analysis;
+          setInsightStats((prev) => ({ ...prev, accepted: prev.accepted + 1 }));
         }
       } catch (err) {
         setAnalysisError('Network error — check your connection.');
@@ -506,6 +636,7 @@ export default function Home() {
     setFactCheckClaims([]);
     setFactCheckStatements([]);
     setFactCheckResults([]);
+    setInsightStats({ accepted: 0, deduped: 0 });
     lastFactCheckedFrameRef.current = null;
     pendingFactCheckFrameRef.current = null;
     isFactCheckingRef.current = false;
