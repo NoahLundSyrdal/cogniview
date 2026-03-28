@@ -1,7 +1,5 @@
-import Anthropic from '@anthropic-ai/sdk';
+import { completeText } from '@/lib/llm';
 import { NextRequest, NextResponse } from 'next/server';
-
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 export async function POST(req: NextRequest) {
   try {
@@ -34,17 +32,16 @@ Your role:
 
 Respond in 1-3 sentences unless a detailed explanation is genuinely needed.`;
 
-    const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 512,
+    const text = await completeText({
       system: systemPrompt,
-      messages: [{ role: 'user', content: message }],
+      user: message,
+      maxTokens: 512,
     });
-
-    const text = response.content[0].type === 'text' ? response.content[0].text : '';
     return NextResponse.json({ response: text });
   } catch (err) {
     console.error('chat error:', err);
-    return NextResponse.json({ error: 'Chat failed' }, { status: 500 });
+    const message = err instanceof Error ? err.message : 'Chat failed';
+    const isConfig = /API key|LLM configured|required for/i.test(message);
+    return NextResponse.json({ error: isConfig ? message : 'Chat failed' }, { status: 500 });
   }
 }

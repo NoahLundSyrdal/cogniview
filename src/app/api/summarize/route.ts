@@ -1,7 +1,5 @@
-import Anthropic from '@anthropic-ai/sdk';
+import { completeText } from '@/lib/llm';
 import { NextRequest, NextResponse } from 'next/server';
-
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 export async function POST(req: NextRequest) {
   try {
@@ -13,18 +11,12 @@ export async function POST(req: NextRequest) {
 
     const insightText = insights
       .map(
-        (i: { timestamp: number; screenType: string; summary: string; keyPoints: string[] }, idx: number) =>
+        (i: { timestamp: number; screenType: string; summary: string; keyPoints: string[] }) =>
           `[${new Date(i.timestamp).toLocaleTimeString()}] (${i.screenType}) ${i.summary}\n  - ${(i.keyPoints || []).join('\n  - ')}`
       )
       .join('\n\n');
 
-    const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 1024,
-      messages: [
-        {
-          role: 'user',
-          content: `You are summarizing a meeting that lasted ${duration || 'unknown'} minutes. Here is a timeline of what was shown on screen:
+    const userPrompt = `You are summarizing a meeting that lasted ${duration || 'unknown'} minutes. Here is a timeline of what was shown on screen:
 
 ${insightText}
 
@@ -37,15 +29,17 @@ Write a concise meeting summary with:
 3. **Action Items** (numbered list)
 4. **Follow-up Questions** (bullet list of things that may need clarification)
 
-Keep it professional and scannable.`,
-        },
-      ],
-    });
+Keep it professional and scannable.`;
 
-    const text = response.content[0].type === 'text' ? response.content[0].text : '';
+    const text = await completeText({ user: userPrompt, maxTokens: 1024 });
     return NextResponse.json({ summary: text });
   } catch (err) {
     console.error('summarize error:', err);
-    return NextResponse.json({ error: 'Summarization failed' }, { status: 500 });
+    const message = err instanceof Error ? err.message : 'Summarization failed';
+    const isConfig = /API key|LLM configured|required for/i.test(message);
+    return NextResponse.json(
+      { error: isConfig ? message : 'Summarization failed' },
+      { status: 500 }
+    );
   }
 }

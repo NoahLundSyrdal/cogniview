@@ -1,26 +1,23 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { completeVision } from '@/lib/llm';
 import { NextRequest, NextResponse } from 'next/server';
+
+function parseDataUrlFrame(frame: string): { base64: string; mimeType: string } {
+  const match = frame.match(/^data:(image\/[\w+.-]+);base64,(.+)$/);
+  if (match) {
+    return { mimeType: match[1], base64: match[2] };
+  }
+  return { mimeType: 'image/jpeg', base64: frame.replace(/^data:image\/\w+;base64,/, '') };
+}
 
 export async function POST(req: NextRequest) {
   try {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      return NextResponse.json(
-        { error: 'GEMINI_API_KEY is not set. Add it to .env.local and restart the dev server.' },
-        { status: 500 }
-      );
-    }
-
     const { frame, previousContext } = await req.json();
 
     if (!frame) {
       return NextResponse.json({ error: 'No frame provided' }, { status: 400 });
     }
 
-    const base64Data = frame.replace(/^data:image\/\w+;base64,/, '');
-
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+    const { base64, mimeType } = parseDataUrlFrame(frame);
 
     const prompt = `You are a meeting copilot analyzing a screen capture from an ongoing meeting or presentation. Your job is to extract useful, actionable insights.
 
@@ -46,17 +43,12 @@ Rules:
 - factCheckFlags only for specific claims with numbers or controversial statements.
 - If screen appears unchanged from context, note that briefly.`;
 
-    const result = await model.generateContent([
+    const text = await completeVision({
       prompt,
-      {
-        inlineData: {
-          mimeType: 'image/jpeg',
-          data: base64Data,
-        },
-      },
-    ]);
-
-    const text = result.response.text().trim();
+      base64,
+      mimeType,
+      maxTokens: 1024,
+    });
 
     let analysis;
     try {
