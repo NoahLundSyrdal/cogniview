@@ -6,6 +6,8 @@ interface Props {
   isCapturing: boolean;
   isAnalyzing: boolean;
   isTranscribing: boolean;
+  hasCompletedMeeting: boolean;
+  isGeneratingSummary: boolean;
   captureError: string | null;
   analysisError: string | null;
   transcriptError: string | null;
@@ -17,6 +19,8 @@ export default function ScreenCapture({
   isCapturing,
   isAnalyzing,
   isTranscribing,
+  hasCompletedMeeting,
+  isGeneratingSummary,
   captureError,
   analysisError,
   transcriptError,
@@ -48,7 +52,7 @@ export default function ScreenCapture({
               : 'bg-gray-800'
           }`}
         >
-          {captureError ? '⚠' : isCapturing ? '👁' : '🖥'}
+          {captureError ? '⚠' : isCapturing ? '👁' : hasCompletedMeeting ? '✓' : '🖥'}
         </div>
       </div>
 
@@ -70,6 +74,15 @@ export default function ScreenCapture({
             ) : (
               <p className="text-gray-500 text-xs">Checking for screen changes every ~3s</p>
             )}
+          </>
+        ) : hasCompletedMeeting ? (
+          <>
+            <p className="text-gray-200 font-medium text-sm">Meeting finished</p>
+            <p className="text-gray-500 text-xs">
+              {isGeneratingSummary
+                ? 'Building your final recap from the screen, transcript, and commitments'
+                : 'Your final recap is ready below. Start another capture anytime.'}
+            </p>
           </>
         ) : (
           <>
@@ -112,7 +125,7 @@ export default function ScreenCapture({
       )}
 
       {/* How it works */}
-      {!isCapturing && !captureError && (
+      {!isCapturing && !captureError && !hasCompletedMeeting && (
         <div className="grid grid-cols-2 gap-4 mt-4 max-w-md text-center sm:grid-cols-4">
           {[
             { icon: '📸', label: 'Samples frames', sub: 'analyzes on change' },

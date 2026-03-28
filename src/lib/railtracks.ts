@@ -13,6 +13,11 @@ type RailtracksFactCheckPayload = {
   error?: unknown;
 };
 
+type RailtracksSummaryPayload = {
+  summary?: unknown;
+  error?: unknown;
+};
+
 async function postRailtracks<T>(path: string, payload: unknown): Promise<T> {
   const baseUrl = process.env.RAILTRACKS_AGENT_URL?.trim();
   if (!baseUrl) {
@@ -162,4 +167,18 @@ export async function callRailtracksFactCheck(payload: {
     claims,
     results: normalizeFactCheckResults(data?.results),
   };
+}
+
+export async function callRailtracksSummary(payload: {
+  insights: unknown[];
+  actionItems: string[];
+  transcriptSegments: unknown[];
+  duration?: number;
+}): Promise<string> {
+  const data = await postRailtracks<RailtracksSummaryPayload>('/summarize', payload);
+  if (typeof data?.summary !== 'string' || !data.summary.trim()) {
+    throw new Error('Railtracks summary agent returned an invalid response');
+  }
+
+  return data.summary.trim();
 }
