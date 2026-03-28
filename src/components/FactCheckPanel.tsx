@@ -1,14 +1,19 @@
 'use client';
 
-import type { FactCheckResult, FactCheckVerdict } from '@/types';
+import type {
+  FactCheckResult,
+  FactCheckStatement,
+  FactCheckStatementSource,
+  FactCheckVerdict,
+} from '@/types';
 import { Button } from '@/components/ui/button';
 
 interface Props {
   isCapturing: boolean;
   isRunning: boolean;
   error: string | null;
-  status: string | null;
   claims: string[];
+  statements?: FactCheckStatement[];
   results: FactCheckResult[];
   onRun: () => Promise<void>;
 }
@@ -34,15 +39,36 @@ const verdictClass: Record<FactCheckVerdict, string> = {
   insufficient_evidence: 'border-gray-600 bg-gray-800/60 text-gray-300',
 };
 
+const sourceLabel: Record<FactCheckStatementSource, string> = {
+  visual: 'Visual',
+  voice: 'Voice',
+};
+
+const sourceClass: Record<FactCheckStatementSource, string> = {
+  visual: 'border-sky-500/30 bg-sky-500/10 text-sky-200',
+  voice: 'border-violet-500/30 bg-violet-500/10 text-violet-200',
+};
+
 export default function FactCheckPanel({
   isCapturing,
   isRunning,
   error,
-  status,
   claims,
+  statements,
   results,
   onRun,
 }: Props) {
+  const normalizedStatements: FactCheckStatement[] =
+    statements && statements.length > 0
+      ? statements
+      : claims.map((claim, index) => ({
+          claim,
+          source: 'visual',
+          priority: index + 1,
+        }));
+  const visualStatements = normalizedStatements.filter((statement) => statement.source === 'visual');
+  const voiceStatements = normalizedStatements.filter((statement) => statement.source === 'voice');
+
   return (
     <div className="p-3 space-y-3">
       <div className="space-y-1">
@@ -72,22 +98,35 @@ export default function FactCheckPanel({
         </div>
       )}
 
-      {status && !error && (
-        <div className="rounded border border-indigo-500/30 bg-indigo-500/10 px-2.5 py-2 text-xs text-indigo-200">
-          {status}
-        </div>
-      )}
-
-      {claims.length > 0 && (
+      {normalizedStatements.length > 0 && (
         <div className="rounded border border-gray-700 bg-gray-800/40 p-2">
-          <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">Extracted claims</p>
-          <ul className="space-y-1">
-            {claims.map((claim) => (
-              <li key={claim} className="text-xs text-gray-300 leading-snug">
-                - {claim}
-              </li>
-            ))}
-          </ul>
+          <p className="text-[11px] uppercase tracking-wide text-gray-500 mb-2">
+            Extracted statements
+          </p>
+          {visualStatements.length > 0 && (
+            <div className="space-y-1.5 mb-2">
+              <p className="text-[11px] text-sky-300">Visual</p>
+              <ul className="space-y-1">
+                {visualStatements.map((statement) => (
+                  <li key={`visual-${statement.claim}`} className="text-xs text-gray-300 leading-snug">
+                    - {statement.claim}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {voiceStatements.length > 0 && (
+            <div className="space-y-1.5">
+              <p className="text-[11px] text-violet-300">Voice</p>
+              <ul className="space-y-1">
+                {voiceStatements.map((statement) => (
+                  <li key={`voice-${statement.claim}`} className="text-xs text-gray-300 leading-snug">
+                    - {statement.claim}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
       )}
 
@@ -104,6 +143,11 @@ export default function FactCheckPanel({
                     key={`${item.claim}-${index}`}
                     className={`rounded border px-2.5 py-2 text-xs space-y-1.5 ${verdictClass[item.verdict]}`}
                   >
+                    <span
+                      className={`inline-flex rounded px-1.5 py-0.5 text-[10px] border ${sourceClass[item.source]}`}
+                    >
+                      {sourceLabel[item.source]}
+                    </span>
                     <p className="font-medium">{item.claim}</p>
                     <p className="leading-snug">{item.summary}</p>
                     {item.sources.length > 0 && (

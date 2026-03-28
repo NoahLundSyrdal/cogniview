@@ -1,6 +1,11 @@
 import type { CopilotChatHistoryMessage, ScreenAnalysisPayload } from '@/lib/meeting-copilot';
 import type { FactCheckResponsePayload } from '@/lib/fact-check';
-import type { FactCheckResult, FactCheckSource } from '@/types';
+import type {
+  FactCheckResult,
+  FactCheckSource,
+  FactCheckStatement,
+  FactCheckStatementSource,
+} from '@/types';
 
 type RailtracksResponsePayload = {
   response?: unknown;
@@ -9,6 +14,7 @@ type RailtracksResponsePayload = {
 
 type RailtracksFactCheckPayload = {
   claims?: unknown;
+  statements?: unknown;
   results?: unknown;
   error?: unknown;
 };
@@ -113,6 +119,7 @@ function normalizeFactCheckResults(value: unknown): FactCheckResult[] {
           : 0.2;
       const verdict =
         typeof candidate.verdict === 'string' ? candidate.verdict.trim().toLowerCase() : '';
+      const source = normalizeStatementSource(candidate.source);
 
       if (!claim || !summary) {
         return null;
@@ -129,6 +136,7 @@ function normalizeFactCheckResults(value: unknown): FactCheckResult[] {
 
       return {
         claim,
+        source,
         verdict,
         confidence,
         summary,
@@ -136,6 +144,34 @@ function normalizeFactCheckResults(value: unknown): FactCheckResult[] {
       };
     })
     .filter((item): item is FactCheckResult => Boolean(item));
+}
+
+function normalizeStatementSource(value: unknown): FactCheckStatementSource {
+  return value === 'voice' ? 'voice' : 'visual';
+}
+
+function normalizeFactCheckStatements(value: unknown): FactCheckStatement[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((item) => {
+      if (!item || typeof item !== 'object') {
+        return null;
+      }
+
+      const candidate = item as Record<string, unknown>;
+      const claim = typeof candidate.claim === 'string' ? candidate.claim.trim() : '';
+      if (!claim) return null;
+      const priority = typeof candidate.priority === 'number' ? candidate.priority : undefined;
+      return {
+        claim,
+        source: normalizeStatementSource(candidate.source),
+        ...(typeof priority === 'number' && Number.isFinite(priority) ? { priority } : {}),
+      };
+    })
+    .filter((item): item is FactCheckStatement => Boolean(item));
 }
 
 export async function callRailtracksAgent(payload: {
@@ -156,15 +192,19 @@ export async function callRailtracksAgent(payload: {
 export async function callRailtracksFactCheck(payload: {
   frame: string;
   meetingContext?: string;
+  screenContext?: string;
+  transcriptContext?: string;
   maxClaims?: number;
 }): Promise<FactCheckResponsePayload> {
   const data = await postRailtracks<RailtracksFactCheckPayload>('/fact-check', payload);
+  const statements = normalizeFactCheckStatements(data?.statements);
   const claims = Array.isArray(data?.claims)
     ? data.claims.filter((claim): claim is string => typeof claim === 'string' && claim.trim().length > 0)
-    : [];
+    : statements.map((statement) => statement.claim);
 
   return {
     claims,
+    statements,
     results: normalizeFactCheckResults(data?.results),
   };
 }

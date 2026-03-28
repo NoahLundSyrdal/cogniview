@@ -7,12 +7,15 @@ export const runtime = 'nodejs';
 type FactCheckRequestPayload = {
   frame?: string;
   meetingContext?: string;
+  screenContext?: string;
+  transcriptContext?: string;
   maxClaims?: number;
 };
 
 export async function POST(req: NextRequest) {
   try {
-    const { frame, meetingContext, maxClaims } = (await req.json()) as FactCheckRequestPayload;
+    const { frame, meetingContext, screenContext, transcriptContext, maxClaims } =
+      (await req.json()) as FactCheckRequestPayload;
     if (!frame || typeof frame !== 'string') {
       return NextResponse.json({ error: 'No frame provided' }, { status: 400 });
     }
@@ -20,6 +23,8 @@ export async function POST(req: NextRequest) {
     const normalizedPayload = {
       frame,
       ...(typeof meetingContext === 'string' ? { meetingContext } : {}),
+      ...(typeof screenContext === 'string' ? { screenContext } : {}),
+      ...(typeof transcriptContext === 'string' ? { transcriptContext } : {}),
       ...(typeof maxClaims === 'number' && Number.isFinite(maxClaims) && maxClaims > 0
         ? { maxClaims: Math.floor(maxClaims) }
         : {}),
