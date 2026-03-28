@@ -1,5 +1,6 @@
 export interface FrameAnalysis {
-  screenType: 'slides' | 'code' | 'document' | 'dashboard' | 'video' | 'browser' | 'other';
+  screenType: 'slides' | 'code' | 'document' | 'dashboard' | 'video' | 'browser' | 'voice' | 'other';
+  source?: 'vision' | 'voice';
   summary: string;
   keyPoints: string[];
   suggestedQuestions: string[];
