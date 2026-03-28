@@ -57,10 +57,11 @@ Copy `.env.example` to `.env` and fill in keys for the provider(s) you want to u
 - `OPENAI_FACTCHECK_IMAGE_MODEL` - model used for image-to-claim extraction (default: `gpt-5.4`).
 - `OPENAI_FACTCHECK_REASONING_MODEL` - model used for web-grounded claim verification (default: `gpt-5.4`).
 - `FACTCHECK_MAX_CLAIMS` - max claims extracted per run (default: `5`).
+- `FACTCHECK_VALIDATION_ATTEMPTS` - max Railtracks review/judge retries per claim before falling back to `insufficient_evidence` (default: `2`).
 
 ## Railtracks Agent Service
 
-Chat can now run through a small Python Railtracks service in [`services/meeting-agent/app.py`](services/meeting-agent/app.py) while the existing Next.js chat route remains as a fallback.
+Chat and fact-checking can now run through a small Python Railtracks service in [`services/meeting-agent/app.py`](services/meeting-agent/app.py) while the existing Next.js route logic remains as a fallback when the service is unset.
 
 ### Run the service
 
@@ -81,7 +82,22 @@ Add this to `.env.local`:
 RAILTRACKS_AGENT_URL=http://127.0.0.1:8000
 ```
 
-Then start the Next app as usual with `npm run dev`. When `RAILTRACKS_AGENT_URL` is set, [`src/app/api/chat/route.ts`](src/app/api/chat/route.ts) forwards the existing chat payload to `POST /chat` on the Python service. When it is unset, the app keeps using `completeText(...)` in TypeScript.
+Then start the Next app as usual with `npm run dev`. When `RAILTRACKS_AGENT_URL` is set:
+
+- [`src/app/api/chat/route.ts`](src/app/api/chat/route.ts) forwards chat payloads to `POST /chat`
+- [`src/app/api/fact-check/route.ts`](src/app/api/fact-check/route.ts) forwards fact-check requests to `POST /fact-check`
+
+When it is unset, the app keeps using the local TypeScript fallback paths.
+
+### Railtracks fact-check flow
+
+Fact-checking now uses a dedicated Railtracks flow in [`services/meeting-agent/fact_check.py`](services/meeting-agent/fact_check.py):
+
+- extract the most check-worthy claims from the latest frame
+- gather web-grounded evidence per claim
+- synthesize a verdict with a Railtracks judge agent
+- review that verdict with a second Railtracks reviewer agent
+- retry weak or overconfident results before returning them to the UI
 
 ### Railtracks observability
 

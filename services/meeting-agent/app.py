@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from fact_check import FACT_CHECK_FLOW, FactCheckRequest, FactCheckResponse
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 load_dotenv(ROOT_DIR / ".env.local", override=False)
@@ -213,7 +214,11 @@ app = FastAPI(title="CogniView Railtracks Meeting Agent")
 
 @app.get("/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok", "flow": MEETING_COPILOT_FLOW.name}
+    return {
+        "status": "ok",
+        "flow": MEETING_COPILOT_FLOW.name,
+        "fact_check_flow": FACT_CHECK_FLOW.name,
+    }
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -230,6 +235,19 @@ async def chat(payload: ChatRequest):
             screen_action_items=payload.screenAnalysis.actionItems if payload.screenAnalysis else None,
         )
         return ChatResponse(response=response)
+    except Exception as error:
+        return JSONResponse(status_code=500, content={"error": str(error)})
+
+
+@app.post("/fact-check", response_model=FactCheckResponse)
+async def fact_check(payload: FactCheckRequest):
+    try:
+        response = await FACT_CHECK_FLOW.ainvoke(
+            frame=payload.frame.strip(),
+            meeting_context=payload.meetingContext,
+            max_claims=payload.maxClaims,
+        )
+        return response
     except Exception as error:
         return JSONResponse(status_code=500, content={"error": str(error)})
 
