@@ -4,6 +4,12 @@ import { NextRequest, NextResponse } from 'next/server';
 export async function POST(req: NextRequest) {
   try {
     const { insights, actionItems, transcriptSegments, duration } = await req.json();
+    const concreteActionItems = Array.isArray(actionItems)
+      ? actionItems
+          .filter((item): item is string => typeof item === 'string')
+          .map((item) => item.trim())
+          .filter(Boolean)
+      : [];
 
     if (!insights?.length && !transcriptSegments?.length) {
       return NextResponse.json({ error: 'No meeting data to summarize' }, { status: 400 });
@@ -31,18 +37,29 @@ Transcript snippets from the meeting audio:
 ${transcriptText || 'No transcript captured.'}
 
 Action items identified:
-${(actionItems || []).map((item: string, i: number) => `${i + 1}. ${item}`).join('\n')}
+${concreteActionItems.map((item, i) => `${i + 1}. ${item}`).join('\n') || 'No explicit action items were pre-identified.'}
 
 Write a concise meeting summary with:
 1. **Overview** (2-3 sentences)
 2. **Key Topics Covered** (bullet list)
-3. **Action Items** (numbered list)
+3. **Action Items** (numbered list with concrete todos)
 4. **Follow-up Questions** (bullet list of things that may need clarification)
 
-Keep it professional and scannable.`;
+Keep it professional and scannable.
+
+Action Items requirements:
+- Extract concrete todos from both transcript snippets and screen timeline.
+- Prefer owner/deadline details when clearly present.
+- If no concrete todos exist, explicitly write \"No concrete todos identified.\"`;
 
     const text = await completeText({ user: userPrompt, maxTokens: 1024 });
-    return NextResponse.json({ summary: text });
+    const concreteTodoAppendix = concreteActionItems.length
+      ? `\n\n## Concrete Todos (verbatim)\n${concreteActionItems
+          .map((item, i) => `${i + 1}. ${item}`)
+          .join('\n')}`
+      : '';
+
+    return NextResponse.json({ summary: `${text}${concreteTodoAppendix}` });
   } catch (err) {
     console.error('summarize error:', err);
     const message = err instanceof Error ? err.message : 'Summarization failed';

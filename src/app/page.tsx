@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { Button } from '@/components/ui/button';
 import { useScreenCapture } from '@/hooks/useScreenCapture';
@@ -9,6 +9,18 @@ import { useMeetingContext } from '@/hooks/useMeetingContext';
 import ScreenCapture from '@/components/ScreenCapture';
 import CopilotSidebar from '@/components/CopilotSidebar';
 import type { FrameAnalysis, FactCheckResult } from '@/types';
+
+const TRANSCRIPT_ACTION_INTERVAL_MS = 15000;
+const TRANSCRIPT_ACTION_MAX_CHARS = 2000;
+const DEFAULT_COMMITMENTS_WINDOW_MS = 120000;
+const DEFAULT_COMMITMENTS_MAX_ITEMS = 2;
+
+function parsePositiveInt(raw: string | undefined, fallback: number) {
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.floor(parsed);
+}
 
 export default function Home() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -24,6 +36,9 @@ export default function Home() {
   const [factCheckResults, setFactCheckResults] = useState<FactCheckResult[]>([]);
   const latestAnalysisRef = useRef<FrameAnalysis | null>(null);
   const transcriptQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const transcriptActionQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const lastTranscriptActionRunAtRef = useRef(0);
+  const lastTranscriptActionInputRef = useRef('');
   const latestFrameRef = useRef<string | null>(null);
   const {
     isOpen: isSidebarDetached,
@@ -48,11 +63,22 @@ export default function Home() {
     allActionItems,
     transcriptSegments,
     addInsight,
+    addActionItems,
     addTranscriptSegment,
     getTranscriptSummary,
     getContextSummary,
+    getLiveNowSummary,
+    getRecentCommitments,
     reset,
   } = useMeetingContext();
+  const commitmentsWindowMs = parsePositiveInt(
+    process.env.NEXT_PUBLIC_COMMITMENTS_WINDOW_MS,
+    DEFAULT_COMMITMENTS_WINDOW_MS
+  );
+  const commitmentsMaxItems = parsePositiveInt(
+    process.env.NEXT_PUBLIC_COMMITMENTS_MAX_ITEMS,
+    DEFAULT_COMMITMENTS_MAX_ITEMS
+  );
 
   const handleFrame = useCallback(
     async (frame: string) => {
@@ -132,10 +158,49 @@ export default function Home() {
     [addTranscriptSegment]
   );
 
+  const extractCommitmentsFromTranscript = useCallback(async () => {
+    const transcriptText = getTranscriptSummary().slice(-TRANSCRIPT_ACTION_MAX_CHARS).trim();
+    if (!transcriptText) return;
+    if (transcriptText === lastTranscriptActionInputRef.current) return;
+
+    const now = Date.now();
+    if (now - lastTranscriptActionRunAtRef.current < TRANSCRIPT_ACTION_INTERVAL_MS) return;
+
+    lastTranscriptActionRunAtRef.current = now;
+    lastTranscriptActionInputRef.current = transcriptText;
+    const meetingContext = getContextSummary();
+
+    transcriptActionQueueRef.current = transcriptActionQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        try {
+          const res = await fetch('/api/extract-actions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ transcriptText, meetingContext }),
+          });
+          const data = await res.json();
+          if (!res.ok) return;
+          if (Array.isArray(data.actionItems) && data.actionItems.length > 0) {
+            addActionItems(data.actionItems);
+          }
+        } catch (err) {
+          console.error('Transcript commitment extraction failed:', err);
+        }
+      });
+
+    await transcriptActionQueueRef.current;
+  }, [addActionItems, getContextSummary, getTranscriptSummary]);
+
   const { isCapturing, captureError, startCapture, stopCapture } = useScreenCapture({
     onFrame: handleFrame,
     onAudioChunk: handleAudioChunk,
   });
+
+  useEffect(() => {
+    if (!isCapturing || transcriptSegments.length === 0) return;
+    void extractCommitmentsFromTranscript();
+  }, [extractCommitmentsFromTranscript, isCapturing, transcriptSegments]);
 
   const handleStart = useCallback(async () => {
     const sidebarWindowPromise = openSidebarWindow().catch((error) => {
@@ -151,6 +216,9 @@ export default function Home() {
     setAssistantChatMessageCount(0);
     setChatSessionId(crypto.randomUUID());
     transcriptQueueRef.current = Promise.resolve();
+    transcriptActionQueueRef.current = Promise.resolve();
+    lastTranscriptActionRunAtRef.current = 0;
+    lastTranscriptActionInputRef.current = '';
     latestFrameRef.current = null;
     setFactCheckError(null);
     setFactCheckClaims([]);
@@ -211,6 +279,8 @@ export default function Home() {
     isAnalyzing: isAnalyzing || activeTranscriptJobs > 0,
     isTranscribing: activeTranscriptJobs > 0,
     allActionItems,
+    liveNowSummary: getLiveNowSummary(),
+    recentCommitments: getRecentCommitments(commitmentsWindowMs, commitmentsMaxItems),
     transcriptSegments,
     startTime,
     factCheckClaims,
