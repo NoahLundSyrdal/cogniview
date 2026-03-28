@@ -24,8 +24,76 @@ const DUPLICATE_INSIGHT_COMBINED_THRESHOLD = 0.64;
 const DUPLICATE_INSIGHT_MEDIUM_THRESHOLD = 0.42;
 const DUPLICATE_INSIGHT_WINDOW_MS = 45000;
 const DUPLICATE_INSIGHT_RECENT_LIMIT = 6;
+const DUPLICATE_INSIGHT_TOPIC_LIMIT = 18;
+const DUPLICATE_INSIGHT_SIGNATURE_THRESHOLD = 0.55;
+const DUPLICATE_INSIGHT_SUMMARY_TOPIC_THRESHOLD = 0.52;
+const DUPLICATE_INSIGHT_PREFIX_WORDS = 14;
+const DUPLICATE_INSIGHT_NOVELTY_THRESHOLD = 0.24;
+const VOICE_INSIGHT_MIN_CHARS = 36;
+const VOICE_INSIGHT_MIN_WORDS = 7;
+const VOICE_INSIGHT_MAX_SUMMARY_CHARS = 420;
+const VOICE_INSIGHT_MIN_ALPHA_RATIO = 0.65;
+const VOICE_INSIGHT_FILLER_RATIO_LIMIT = 0.45;
+const VOICE_INSIGHT_COOLDOWN_MS = 10000;
+const VOICE_INSIGHT_HIGH_NOVELTY_THRESHOLD = 0.52;
+const VOICE_INSIGHT_DUPLICATE_LOOKBACK = 8;
+const VOICE_INSIGHT_MIN_CONTENT_SCORE = 2;
+const VOICE_BUFFER_MIN_CHARS = 500;
+const VOICE_BUFFER_MAX_CHARS = 900;
+const VOICE_BUFFER_FLUSH_INTERVAL_MS = 60000;
 const DOMAIN_RE = /\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b/gi;
 const QUOTED_TEXT_RE = /["'“”‘’]([^"'“”‘’]{8,160})["'“”‘’]/g;
+const NON_ALPHA_RE = /[^a-z\s]/gi;
+const NUMBER_TOKEN_RE = /\b\d[\d,./-]*\b/;
+const ACTION_CUE_RE =
+  /\b(need to|needs to|must|should|please|make sure|follow up|action item|next step|send|submit|review|prepare|schedule|assign|update|share|deliver)\b/i;
+const DECISION_CUE_RE =
+  /\b(decided|decision|agreed|approved|plan is|we will|deadline|owner|by (monday|tuesday|wednesday|thursday|friday|saturday|sunday)|today|tomorrow)\b/i;
+const SMALLTALK_RE =
+  /\b(hello|hi|hey|how are you|thanks|thank you|good morning|good afternoon|good evening|bye|see you)\b/i;
+const FILLER_TOKEN_SET = new Set([
+  'uh',
+  'um',
+  'hmm',
+  'mm',
+  'mmm',
+  'ah',
+  'er',
+  'like',
+  'you',
+  'know',
+  'sorta',
+  'kinda',
+]);
+const INFORMATIVE_TOKEN_SET = new Set([
+  'deadline',
+  'deliverable',
+  'requirement',
+  'risk',
+  'issue',
+  'blocker',
+  'status',
+  'update',
+  'decision',
+  'owner',
+  'project',
+  'report',
+  'result',
+  'finding',
+  'budget',
+  'scope',
+  'milestone',
+  'roadmap',
+  'customer',
+  'contract',
+  'invoice',
+  'release',
+  'deploy',
+  'fix',
+  'bug',
+  'test',
+  'action',
+]);
 
 function normalizeStringArray(value: unknown) {
   if (!Array.isArray(value)) return [];
@@ -43,6 +111,37 @@ function normalizeInsightText(text: string) {
 function tokenizeInsightText(text: string) {
   const normalized = normalizeInsightText(text);
   return normalized ? normalized.split(' ') : [];
+}
+
+function toWordPrefix(text: string, maxWords = DUPLICATE_INSIGHT_PREFIX_WORDS) {
+  return normalizeInsightText(text)
+    .split(' ')
+    .filter(Boolean)
+    .slice(0, maxWords)
+    .join(' ');
+}
+
+function toFirstSentence(text: string) {
+  const sentence = text.split(/[.!?]/)[0] || '';
+  return normalizeInsightText(sentence);
+}
+
+function hasRepeatedSummaryLead(previousSummary: string, nextSummary: string) {
+  const previousSentence = toFirstSentence(previousSummary);
+  const nextSentence = toFirstSentence(nextSummary);
+  if (previousSentence && nextSentence) {
+    if (previousSentence === nextSentence) return true;
+    if (previousSentence.includes(nextSentence) || nextSentence.includes(previousSentence)) {
+      const minLength = Math.min(previousSentence.length, nextSentence.length);
+      if (minLength >= 20) return true;
+    }
+  }
+
+  const previousPrefix = toWordPrefix(previousSummary);
+  const nextPrefix = toWordPrefix(nextSummary);
+  if (!previousPrefix || !nextPrefix) return false;
+  if (previousPrefix === nextPrefix) return true;
+  return previousPrefix.includes(nextPrefix) || nextPrefix.includes(previousPrefix);
 }
 
 function buildInsightCombinedText(analysis: FrameAnalysis) {
@@ -112,6 +211,179 @@ function listSimilarity(left: string[], right: string[]) {
   const leftTokens = left.map(normalizeInsightText).filter(Boolean);
   const rightTokens = right.map(normalizeInsightText).filter(Boolean);
   return jaccardSimilarity(leftTokens, rightTokens);
+}
+
+function signatureSimilarity(left: string | undefined, right: string | undefined) {
+  const leftTokens = tokenizeInsightText(left || '');
+  const rightTokens = tokenizeInsightText(right || '');
+  if (!leftTokens.length || !rightTokens.length) return 0;
+  return jaccardSimilarity(leftTokens, rightTokens);
+}
+
+function isSameInsightTopic(previous: FrameAnalysis, next: FrameAnalysis) {
+  if (previous.screenType !== next.screenType) return false;
+
+  const signatureScore = signatureSimilarity(previous.sceneSignature, next.sceneSignature);
+  if (signatureScore >= DUPLICATE_INSIGHT_SIGNATURE_THRESHOLD) {
+    return true;
+  }
+
+  const summaryScore = jaccardSimilarity(
+    tokenizeInsightText(previous.summary),
+    tokenizeInsightText(next.summary)
+  );
+  return summaryScore >= DUPLICATE_INSIGHT_SUMMARY_TOPIC_THRESHOLD;
+}
+
+function summaryNoveltyScore(nextSummary: string, previousInsights: FrameAnalysis[]) {
+  const nextTokens = new Set(tokenizeInsightText(nextSummary));
+  if (nextTokens.size === 0) return 0;
+
+  const previousTokenSet = new Set<string>();
+  for (const insight of previousInsights) {
+    for (const token of tokenizeInsightText(insight.summary)) {
+      previousTokenSet.add(token);
+    }
+  }
+
+  let novelTokens = 0;
+  for (const token of nextTokens) {
+    if (!previousTokenSet.has(token)) {
+      novelTokens += 1;
+    }
+  }
+
+  return novelTokens / nextTokens.size;
+}
+
+function buildPreviousInsightContext(insight: FrameAnalysis | null) {
+  if (!insight) return '';
+
+  const signature = insight.sceneSignature?.trim() || 'none';
+  return [
+    'Latest accepted insight:',
+    `- Previous sceneSignature: ${signature}`,
+    `- Previous summary: ${insight.summary}`,
+  ].join('\n');
+}
+
+function getLatestVisionInsight(insights: FrameAnalysis[]) {
+  for (let index = insights.length - 1; index >= 0; index -= 1) {
+    const insight = insights[index];
+    if (insight.source !== 'voice' && insight.screenType !== 'voice') {
+      return insight;
+    }
+  }
+  return null;
+}
+
+function countWordTokens(text: string) {
+  return normalizeInsightText(text).split(' ').filter(Boolean);
+}
+
+function hasExcessiveRepeatedWordRun(tokens: string[]) {
+  if (tokens.length < 5) return false;
+  let run = 1;
+  for (let index = 1; index < tokens.length; index += 1) {
+    if (tokens[index] === tokens[index - 1]) {
+      run += 1;
+      if (run >= 4) return true;
+    } else {
+      run = 1;
+    }
+  }
+  return false;
+}
+
+function alphaRatio(text: string) {
+  const normalized = text.toLowerCase();
+  const withoutSpaces = normalized.replace(/\s+/g, '');
+  if (!withoutSpaces.length) return 0;
+  const alphaChars = withoutSpaces.replace(NON_ALPHA_RE, '').length;
+  return alphaChars / withoutSpaces.length;
+}
+
+function fillerRatio(tokens: string[]) {
+  if (!tokens.length) return 1;
+  let filler = 0;
+  for (const token of tokens) {
+    if (FILLER_TOKEN_SET.has(token)) filler += 1;
+  }
+  return filler / tokens.length;
+}
+
+function informativeTokenCount(tokens: string[]) {
+  let count = 0;
+  for (const token of tokens) {
+    if (INFORMATIVE_TOKEN_SET.has(token)) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function voiceContentScore(clean: string, tokens: string[]) {
+  let score = 0;
+
+  if (NUMBER_TOKEN_RE.test(clean)) score += 1;
+  if (ACTION_CUE_RE.test(clean)) score += 2;
+  if (DECISION_CUE_RE.test(clean)) score += 2;
+  if (informativeTokenCount(tokens) >= 2) score += 1;
+
+  return score;
+}
+
+function isConservativeVoiceTranscript(text: string) {
+  const clean = text.replace(/\s+/g, ' ').trim();
+  if (clean.length < VOICE_INSIGHT_MIN_CHARS) return false;
+
+  const tokens = countWordTokens(clean);
+  if (tokens.length < VOICE_INSIGHT_MIN_WORDS) return false;
+  if (hasExcessiveRepeatedWordRun(tokens)) return false;
+  if (alphaRatio(clean) < VOICE_INSIGHT_MIN_ALPHA_RATIO) return false;
+  if (fillerRatio(tokens) > VOICE_INSIGHT_FILLER_RATIO_LIMIT) return false;
+  if (SMALLTALK_RE.test(clean) && !ACTION_CUE_RE.test(clean) && !DECISION_CUE_RE.test(clean)) {
+    return false;
+  }
+  if (voiceContentScore(clean, tokens) < VOICE_INSIGHT_MIN_CONTENT_SCORE) return false;
+
+  return true;
+}
+
+function summarizeVoiceTranscript(text: string) {
+  const clean = text.replace(/\s+/g, ' ').trim();
+  const sentences = clean
+    .split(/(?<=[.!?])\s+/)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
+
+  const useful = sentences.filter((sentence) => {
+    const tokens = countWordTokens(sentence);
+    if (!tokens.length) return false;
+    if (SMALLTALK_RE.test(sentence) && !ACTION_CUE_RE.test(sentence) && !DECISION_CUE_RE.test(sentence)) {
+      return false;
+    }
+    return voiceContentScore(sentence, tokens) >= VOICE_INSIGHT_MIN_CONTENT_SCORE;
+  });
+
+  const picked = (useful.length > 0 ? useful : sentences).slice(0, 3);
+  const summary = picked.join(' ').replace(/\s+/g, ' ').trim();
+  return summary.slice(0, VOICE_INSIGHT_MAX_SUMMARY_CHARS);
+}
+
+function buildVoiceSceneSignature(summary: string) {
+  return `voice ${toWordPrefix(summary, 8)}`.trim();
+}
+
+function appendBufferedVoiceText(existing: string, incoming: string) {
+  const normalizedExisting = existing.replace(/\s+/g, ' ').trim();
+  const normalizedIncoming = incoming.replace(/\s+/g, ' ').trim();
+  if (!normalizedIncoming) return normalizedExisting;
+  if (!normalizedExisting) return normalizedIncoming;
+  if (normalizedExisting === normalizedIncoming) return normalizedExisting;
+  if (normalizedExisting.endsWith(normalizedIncoming)) return normalizedExisting;
+  if (normalizedIncoming.startsWith(normalizedExisting)) return normalizedIncoming;
+  return `${normalizedExisting} ${normalizedIncoming}`.replace(/\s+/g, ' ').trim();
 }
 
 function isNearDuplicateInsight(previous: FrameAnalysis | null, next: FrameAnalysis) {
@@ -197,6 +469,7 @@ export default function Home() {
   const [factCheckClaims, setFactCheckClaims] = useState<string[]>([]);
   const [factCheckStatements, setFactCheckStatements] = useState<FactCheckStatement[]>([]);
   const [factCheckResults, setFactCheckResults] = useState<FactCheckResult[]>([]);
+  const [insightStats, setInsightStats] = useState({ accepted: 0, deduped: 0 });
   const insightsRef = useRef<FrameAnalysis[]>([]);
   const latestAnalysisRef = useRef<FrameAnalysis | null>(null);
   const transcriptQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -204,6 +477,12 @@ export default function Home() {
   const lastTranscriptActionRunAtRef = useRef(0);
   const lastTranscriptActionInputRef = useRef('');
   const latestTranscriptContextRef = useRef('');
+  const lastVoiceInsightAtRef = useRef(0);
+  const lastVoiceInsightSummaryRef = useRef('');
+  const voiceTranscriptBufferRef = useRef('');
+  const lastVoiceBufferedDigestRef = useRef('');
+  const voiceLastFlushAtRef = useRef(0);
+  const voiceFlushTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestFrameRef = useRef<string | null>(null);
   const lastFactCheckedKeyRef = useRef<string | null>(null);
   const pendingFactCheckFrameRef = useRef<string | null>(null);
@@ -254,6 +533,15 @@ export default function Home() {
   useEffect(() => {
     latestTranscriptContextRef.current = getTranscriptSummary();
   }, [getTranscriptSummary, transcriptSegments]);
+
+  useEffect(() => {
+    if (process.env.NODE_ENV !== 'development') return;
+    console.debug(
+      '[insights] accepted=%d deduped=%d',
+      insightStats.accepted,
+      insightStats.deduped
+    );
+  }, [getTranscriptSummary, insightStats.accepted, insightStats.deduped, transcriptSegments]);
 
   const generateFinalSummary = useCallback(
     async (sessionId: number) => {
@@ -513,6 +801,134 @@ export default function Home() {
       });
     }, BACKGROUND_FACTCHECK_DEBOUNCE_MS);
   }, [buildFactCheckRequest, executeFactCheck]);
+  const acceptInsightCandidate = useCallback(
+    (analysis: FrameAnalysis, options?: { setAsLatestScreenAnalysis?: boolean }) => {
+      const recentInsights = insightsRef.current
+        .filter((item) => analysis.timestamp - item.timestamp <= DUPLICATE_INSIGHT_WINDOW_MS)
+        .slice(-DUPLICATE_INSIGHT_TOPIC_LIMIT);
+      const topicInsights = recentInsights.filter((item) => isSameInsightTopic(item, analysis));
+      const duplicateCandidates =
+        topicInsights.length > 0
+          ? topicInsights
+          : recentInsights.slice(-DUPLICATE_INSIGHT_RECENT_LIMIT);
+      if (duplicateCandidates.some((item) => hasRepeatedSummaryLead(item.summary, analysis.summary))) {
+        setInsightStats((prev) => ({ ...prev, deduped: prev.deduped + 1 }));
+        return false;
+      }
+      const noveltyScore = summaryNoveltyScore(analysis.summary, duplicateCandidates);
+      if (
+        duplicateCandidates.length > 0 &&
+        noveltyScore < DUPLICATE_INSIGHT_NOVELTY_THRESHOLD &&
+        analysis.actionItems.length === 0 &&
+        analysis.factCheckFlags.length === 0
+      ) {
+        setInsightStats((prev) => ({ ...prev, deduped: prev.deduped + 1 }));
+        return false;
+      }
+      if (duplicateCandidates.some((item) => isNearDuplicateInsight(item, analysis))) {
+        setInsightStats((prev) => ({ ...prev, deduped: prev.deduped + 1 }));
+        return false;
+      }
+
+      addInsight(analysis);
+      if (options?.setAsLatestScreenAnalysis) {
+        latestAnalysisRef.current = analysis;
+      }
+      setInsightStats((prev) => ({ ...prev, accepted: prev.accepted + 1 }));
+      return true;
+    },
+    [addInsight]
+  );
+
+  const flushVoiceBuffer = useCallback(
+    (reason: 'size' | 'time' | 'stop' = 'time') => {
+      if (voiceFlushTimeoutRef.current) {
+        clearTimeout(voiceFlushTimeoutRef.current);
+        voiceFlushTimeoutRef.current = null;
+      }
+
+      const bufferedText = voiceTranscriptBufferRef.current.replace(/\s+/g, ' ').trim();
+      if (!bufferedText) return false;
+
+      const minChars = reason === 'stop' ? VOICE_INSIGHT_MIN_CHARS : VOICE_BUFFER_MIN_CHARS;
+      if (bufferedText.length < minChars) {
+        return false;
+      }
+
+      const digest = normalizeInsightText(bufferedText);
+      if (digest && digest === lastVoiceBufferedDigestRef.current) {
+        voiceTranscriptBufferRef.current = '';
+        voiceLastFlushAtRef.current = Date.now();
+        return false;
+      }
+      lastVoiceBufferedDigestRef.current = digest;
+      voiceTranscriptBufferRef.current = '';
+      voiceLastFlushAtRef.current = Date.now();
+
+      if (!isConservativeVoiceTranscript(bufferedText)) {
+        return false;
+      }
+
+      const voiceSummary = summarizeVoiceTranscript(bufferedText);
+      if (!voiceSummary) {
+        return false;
+      }
+
+      if (
+        lastVoiceInsightSummaryRef.current &&
+        hasRepeatedSummaryLead(lastVoiceInsightSummaryRef.current, voiceSummary)
+      ) {
+        return false;
+      }
+
+      const now = Date.now();
+      const recentVoiceInsights = insightsRef.current
+        .filter((insight) => insight.source === 'voice' || insight.screenType === 'voice')
+        .slice(-VOICE_INSIGHT_DUPLICATE_LOOKBACK);
+      const voiceNovelty = summaryNoveltyScore(voiceSummary, recentVoiceInsights);
+
+      if (
+        now - lastVoiceInsightAtRef.current < VOICE_INSIGHT_COOLDOWN_MS &&
+        voiceNovelty < VOICE_INSIGHT_HIGH_NOVELTY_THRESHOLD
+      ) {
+        return false;
+      }
+
+      const voiceInsight: FrameAnalysis = {
+        screenType: 'voice',
+        source: 'voice',
+        summary: voiceSummary,
+        keyPoints: [],
+        suggestedQuestions: [],
+        actionItems: [],
+        factCheckFlags: [],
+        sceneSignature: buildVoiceSceneSignature(voiceSummary),
+        contextForNext: context,
+        timestamp: now,
+      };
+
+      if (acceptInsightCandidate(voiceInsight)) {
+        lastVoiceInsightAtRef.current = now;
+        lastVoiceInsightSummaryRef.current = voiceSummary;
+        return true;
+      }
+
+      return false;
+    },
+    [acceptInsightCandidate, context]
+  );
+
+  const scheduleVoiceBufferFlush = useCallback(() => {
+    if (voiceFlushTimeoutRef.current) return;
+    if (!voiceTranscriptBufferRef.current.trim()) return;
+
+    const elapsed = Date.now() - voiceLastFlushAtRef.current;
+    const delay = Math.max(1000, VOICE_BUFFER_FLUSH_INTERVAL_MS - elapsed);
+    voiceFlushTimeoutRef.current = setTimeout(() => {
+      voiceFlushTimeoutRef.current = null;
+      flushVoiceBuffer('time');
+    }, delay);
+  }, [flushVoiceBuffer]);
 
   const handleFrame = useCallback(
     async (frame: string) => {
@@ -528,6 +944,9 @@ export default function Home() {
       setIsAnalyzing(true);
       setAnalysisError(null);
       const transcriptSummary = getTranscriptSummary();
+      const previousInsightContext = buildPreviousInsightContext(
+        getLatestVisionInsight(insightsRef.current)
+      );
 
       try {
         const res = await fetch('/api/analyze-frame', {
@@ -535,7 +954,11 @@ export default function Home() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             frame,
-            previousContext: [context, transcriptSummary && `Recent transcript:\n${transcriptSummary}`]
+            previousContext: [
+              context,
+              previousInsightContext,
+              transcriptSummary && `Recent transcript:\n${transcriptSummary}`,
+            ]
               .filter(Boolean)
               .join('\n\n'),
           }),
@@ -546,18 +969,12 @@ export default function Home() {
         } else {
           const analysis: FrameAnalysis = {
             ...data,
+            source: 'vision',
             sceneSignature:
               typeof data.sceneSignature === 'string' ? data.sceneSignature.trim() : '',
             timestamp: Date.now(),
           };
-          const recentInsights = insightsRef.current
-            .filter((item) => analysis.timestamp - item.timestamp <= DUPLICATE_INSIGHT_WINDOW_MS)
-            .slice(-DUPLICATE_INSIGHT_RECENT_LIMIT);
-          if (recentInsights.some((item) => isNearDuplicateInsight(item, analysis))) {
-            return;
-          }
-          addInsight(analysis);
-          latestAnalysisRef.current = analysis;
+          acceptInsightCandidate(analysis, { setAsLatestScreenAnalysis: true });
         }
       } catch (err) {
         setAnalysisError('Network error — check your connection.');
@@ -565,7 +982,7 @@ export default function Home() {
       }
       setIsAnalyzing(false);
     },
-    [context, addInsight, executeFactCheck, getTranscriptSummary, scheduleBackgroundFactCheck]
+    [acceptInsightCandidate, context, executeFactCheck, getTranscriptSummary, scheduleBackgroundFactCheck]
   );
 
   const handleAudioChunk = useCallback(
@@ -592,8 +1009,25 @@ export default function Home() {
               return;
             }
 
-            if (data.text?.trim()) {
-              addTranscriptSegment({ text: data.text });
+            const transcriptText = typeof data.text === 'string' ? data.text.trim() : '';
+            if (transcriptText) {
+              addTranscriptSegment({ text: transcriptText });
+              voiceTranscriptBufferRef.current = appendBufferedVoiceText(
+                voiceTranscriptBufferRef.current,
+                transcriptText
+              );
+
+              const now = Date.now();
+              const shouldFlushBySize = voiceTranscriptBufferRef.current.length >= VOICE_BUFFER_MAX_CHARS;
+              const shouldFlushByTime =
+                now - voiceLastFlushAtRef.current >= VOICE_BUFFER_FLUSH_INTERVAL_MS &&
+                voiceTranscriptBufferRef.current.length >= VOICE_BUFFER_MIN_CHARS;
+
+              if (shouldFlushBySize || shouldFlushByTime) {
+                flushVoiceBuffer(shouldFlushBySize ? 'size' : 'time');
+              } else {
+                scheduleVoiceBufferFlush();
+              }
             }
           } catch (err) {
             console.error('Audio transcription failed:', err);
@@ -605,7 +1039,7 @@ export default function Home() {
 
       await transcriptQueueRef.current;
     },
-    [addTranscriptSegment]
+    [addTranscriptSegment, flushVoiceBuffer, scheduleVoiceBufferFlush]
   );
 
   const extractCommitmentsFromTranscript = useCallback(async () => {
@@ -696,6 +1130,16 @@ export default function Home() {
     scheduleBackgroundFactCheck();
   }, [isCapturing, scheduleBackgroundFactCheck, transcriptSegments]);
 
+  useEffect(
+    () => () => {
+      if (voiceFlushTimeoutRef.current) {
+        clearTimeout(voiceFlushTimeoutRef.current);
+        voiceFlushTimeoutRef.current = null;
+      }
+    },
+    []
+  );
+
   const handleStart = useCallback(async () => {
     meetingSessionIdRef.current += 1;
     const sidebarWindowPromise = openSidebarWindow().catch((error) => {
@@ -721,6 +1165,15 @@ export default function Home() {
     lastTranscriptActionRunAtRef.current = 0;
     lastTranscriptActionInputRef.current = '';
     latestTranscriptContextRef.current = '';
+    lastVoiceInsightAtRef.current = 0;
+    lastVoiceInsightSummaryRef.current = '';
+    voiceTranscriptBufferRef.current = '';
+    lastVoiceBufferedDigestRef.current = '';
+    voiceLastFlushAtRef.current = Date.now();
+    if (voiceFlushTimeoutRef.current) {
+      clearTimeout(voiceFlushTimeoutRef.current);
+      voiceFlushTimeoutRef.current = null;
+    }
     latestFrameRef.current = null;
     latestAnalysisRef.current = null;
     setFactCheckError(null);
@@ -737,6 +1190,7 @@ export default function Home() {
     cachedFactCheckSnapshotRef.current = null;
     factCheckHistoryRef.current = [];
     lastFactCheckedKeyRef.current = null;
+    setInsightStats({ accepted: 0, deduped: 0 });
     pendingFactCheckFrameRef.current = null;
     isFactCheckingRef.current = false;
     const didStart = await startCapture();
@@ -752,6 +1206,7 @@ export default function Home() {
   }, [closeSidebarWindow, openSidebarWindow, reset, startCapture]);
 
   const handleStop = useCallback(async () => {
+    flushVoiceBuffer('stop');
     pendingFactCheckFrameRef.current = null;
     setFactCheckStatus(null);
     await stopCapture();
@@ -779,7 +1234,7 @@ export default function Home() {
       }
     }
     requestFinalSummary();
-  }, [buildFactCheckRequest, executeFactCheck, requestFinalSummary, stopCapture]);
+  }, [buildFactCheckRequest, executeFactCheck, flushVoiceBuffer, requestFinalSummary, stopCapture]);
 
   const handleRunFactCheck = useCallback(async () => {
     const latestFrame = latestFrameRef.current;
