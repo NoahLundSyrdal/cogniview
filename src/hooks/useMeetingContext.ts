@@ -1,23 +1,57 @@
 'use client';
 
-import { useState, useCallback } from 'react';
-import type { FrameAnalysis, ChatMessage, TranscriptSegment } from '@/types';
+import { useState, useCallback, type Dispatch, type SetStateAction } from 'react';
+import type {
+  FrameAnalysis,
+  ChatMessage,
+  TranscriptSegment,
+  MeetingSignal,
+  MeetingSignalSource,
+  MeetingSignalsPayload,
+} from '@/types';
 
 const MAX_CONTEXT_CHARS = 2000;
 const MAX_TRANSCRIPT_SEGMENTS = 80;
 const TRANSCRIPT_MERGE_WINDOW_MS = 12000;
 const TRAILING_PUNCTUATION_RE = /[.!?,;:]+$/;
-const MAX_LIVE_SUMMARY_CHARS = 320;
-const MAX_COMMITMENTS = 120;
-const DEFAULT_COMMITMENTS_WINDOW_MS = 120000;
-const DEFAULT_COMMITMENTS_MAX_ITEMS = 2;
-
-interface MeetingCommitment {
-  id: string;
-  text: string;
-  timestamp: number;
-  source: 'vision' | 'speech';
-}
+const MAX_MEETING_SIGNALS = 120;
+const SIGNAL_DEDUPE_STOPWORDS = new Set([
+  'a',
+  'an',
+  'and',
+  'at',
+  'by',
+  'for',
+  'from',
+  'in',
+  'into',
+  'of',
+  'on',
+  'or',
+  'the',
+  'to',
+  'via',
+  'with',
+  'must',
+  'need',
+  'needs',
+  'should',
+  'please',
+  'complete',
+  'submit',
+  'review',
+  'prepare',
+  'ensure',
+  'include',
+  'including',
+  'write',
+  'draft',
+  'finalize',
+  'hand',
+  'turn',
+  'send',
+  'make',
+]);
 
 function mergeTranscriptText(existing: string, incoming: string) {
   if (!existing) return incoming;
@@ -28,12 +62,56 @@ function mergeTranscriptText(existing: string, incoming: string) {
   return `${existing} ${incoming}`.replace(/\s+/g, ' ').trim();
 }
 
-function normalizeActionItem(item: string): string {
+function normalizeSignalText(item: string): string {
   return item
     .trim()
     .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
     .replace(/\s+/g, ' ')
     .replace(TRAILING_PUNCTUATION_RE, '');
+}
+
+function tokenizeSignalText(item: string) {
+  return normalizeSignalText(item)
+    .split(' ')
+    .filter((token) => token.length >= 2 && !SIGNAL_DEDUPE_STOPWORDS.has(token));
+}
+
+function signalSimilarity(left: string, right: string) {
+  const leftTokens = tokenizeSignalText(left);
+  const rightTokens = tokenizeSignalText(right);
+
+  if (leftTokens.length === 0 || rightTokens.length === 0) return 0;
+
+  const leftSet = new Set(leftTokens);
+  const rightSet = new Set(rightTokens);
+  let intersection = 0;
+  for (const token of leftSet) {
+    if (rightSet.has(token)) {
+      intersection += 1;
+    }
+  }
+
+  const union = new Set([...leftSet, ...rightSet]).size;
+  return union === 0 ? 0 : intersection / union;
+}
+
+function isNearDuplicateSignal(left: string, right: string) {
+  const normalizedLeft = normalizeSignalText(left);
+  const normalizedRight = normalizeSignalText(right);
+
+  if (!normalizedLeft || !normalizedRight) return false;
+  if (normalizedLeft === normalizedRight) return true;
+  if (
+    (normalizedLeft.includes(normalizedRight) || normalizedRight.includes(normalizedLeft)) &&
+    Math.min(normalizedLeft.length, normalizedRight.length) /
+      Math.max(normalizedLeft.length, normalizedRight.length) >=
+      0.68
+  ) {
+    return true;
+  }
+
+  return signalSimilarity(left, right) >= 0.74;
 }
 
 export function useMeetingContext() {
@@ -41,64 +119,102 @@ export function useMeetingContext() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [context, setContext] = useState('');
   const [allActionItems, setAllActionItems] = useState<string[]>([]);
-  const [commitments, setCommitments] = useState<MeetingCommitment[]>([]);
+  const [actionSignals, setActionSignals] = useState<MeetingSignal[]>([]);
+  const [decisionSignals, setDecisionSignals] = useState<MeetingSignal[]>([]);
+  const [openQuestionSignals, setOpenQuestionSignals] = useState<MeetingSignal[]>([]);
   const [transcriptSegments, setTranscriptSegments] = useState<TranscriptSegment[]>([]);
 
-  const mergeActionItems = useCallback((items: string[], source: MeetingCommitment['source']) => {
-    if (!items.length) return;
+  const mergeSignalEntries = useCallback(
+    (
+      items: string[],
+      source: MeetingSignalSource,
+      setSignals: Dispatch<SetStateAction<MeetingSignal[]>>
+    ) => {
+      if (!items.length) return;
 
-    const inserted: Array<{ text: string; key: string }> = [];
+      setSignals((prev) => {
+        const next = [...prev];
+        const now = Date.now();
 
-    setAllActionItems((prev) => {
-      const existingKeys = new Set(prev.map((item) => normalizeActionItem(item)));
-      const newItems: string[] = [];
-      for (const item of items) {
-        if (typeof item !== 'string') continue;
-        const clean = item.trim();
-        if (!clean) continue;
-        const key = normalizeActionItem(clean);
-        if (!key || existingKeys.has(key)) continue;
-        existingKeys.add(key);
-        newItems.push(clean);
-        inserted.push({ text: clean, key });
+        for (const item of items) {
+          if (typeof item !== 'string') continue;
+          const clean = item.trim();
+          if (!clean) continue;
+          if (!normalizeSignalText(clean)) continue;
+          if (next.some((existing) => isNearDuplicateSignal(existing.text, clean))) continue;
+          next.push({
+            id: crypto.randomUUID(),
+            text: clean,
+            timestamp: now,
+            source,
+          });
+        }
+
+        return next.slice(-MAX_MEETING_SIGNALS);
+      });
+    },
+    []
+  );
+
+  const mergeActionItems = useCallback(
+    (items: string[], source: MeetingSignalSource) => {
+      if (!items.length) return;
+
+      const inserted: string[] = [];
+
+      setAllActionItems((prev) => {
+        const newItems: string[] = [];
+        for (const item of items) {
+          if (typeof item !== 'string') continue;
+          const clean = item.trim();
+          if (!clean) continue;
+          if (!normalizeSignalText(clean)) continue;
+          if (
+            prev.some((existing) => isNearDuplicateSignal(existing, clean)) ||
+            newItems.some((existing) => isNearDuplicateSignal(existing, clean))
+          ) {
+            continue;
+          }
+          newItems.push(clean);
+          inserted.push(clean);
+        }
+        if (!newItems.length) return prev;
+        return [...prev, ...newItems];
+      });
+
+      if (!inserted.length) return;
+      mergeSignalEntries(inserted, source, setActionSignals);
+    },
+    [mergeSignalEntries]
+  );
+
+  const addMeetingSignals = useCallback(
+    (signals: MeetingSignalsPayload, source: MeetingSignalSource = 'speech') => {
+      mergeActionItems(signals.actionItems || [], source);
+      mergeSignalEntries(signals.decisions || [], source, setDecisionSignals);
+      mergeSignalEntries(signals.openQuestions || [], source, setOpenQuestionSignals);
+    },
+    [mergeActionItems, mergeSignalEntries]
+  );
+
+  const addInsight = useCallback(
+    (analysis: FrameAnalysis) => {
+      setInsights((prev) => [...prev, analysis]);
+      setContext(analysis.contextForNext || '');
+
+      if (analysis.actionItems?.length) {
+        mergeActionItems(analysis.actionItems, 'vision');
       }
-      if (!newItems.length) return prev;
-      return [...prev, ...newItems];
-    });
+    },
+    [mergeActionItems]
+  );
 
-    if (!inserted.length) return;
-
-    setCommitments((prev) => {
-      const now = Date.now();
-      const seenKeys = new Set(prev.map((item) => normalizeActionItem(item.text)));
-      const newCommitments: MeetingCommitment[] = [];
-      for (const entry of inserted) {
-        if (!entry.key || seenKeys.has(entry.key)) continue;
-        seenKeys.add(entry.key);
-        newCommitments.push({
-          id: crypto.randomUUID(),
-          text: entry.text,
-          timestamp: now,
-          source,
-        });
-      }
-      if (!newCommitments.length) return prev;
-      return [...prev, ...newCommitments].slice(-MAX_COMMITMENTS);
-    });
-  }, []);
-
-  const addInsight = useCallback((analysis: FrameAnalysis) => {
-    setInsights((prev) => [...prev, analysis]);
-    setContext(analysis.contextForNext || '');
-
-    if (analysis.actionItems?.length) {
-      mergeActionItems(analysis.actionItems, 'vision');
-    }
-  }, [mergeActionItems]);
-
-  const addActionItems = useCallback((items: string[]) => {
-    mergeActionItems(items, 'speech');
-  }, [mergeActionItems]);
+  const addActionItems = useCallback(
+    (items: string[]) => {
+      addMeetingSignals({ actionItems: items }, 'speech');
+    },
+    [addMeetingSignals]
+  );
 
   const addMessage = useCallback((msg: Omit<ChatMessage, 'id' | 'timestamp'>) => {
     const full: ChatMessage = {
@@ -152,68 +268,32 @@ export function useMeetingContext() {
     return summary.slice(-MAX_CONTEXT_CHARS);
   }, [transcriptSegments]);
 
-  const getContextSummary = useCallback(() => {
+  const getScreenSummary = useCallback(() => {
     const recentInsights = insights.slice(-5);
     const visualSummary = recentInsights
-      .map((i) => `[${new Date(i.timestamp).toLocaleTimeString()}] ${i.summary}`)
+      .map((insight) => `[${new Date(insight.timestamp).toLocaleTimeString()}] ${insight.summary}`)
       .join('\n');
+    return visualSummary.slice(-MAX_CONTEXT_CHARS);
+  }, [insights]);
+
+  const getContextSummary = useCallback(() => {
+    const visualSummary = getScreenSummary();
     const transcriptSummary = getTranscriptSummary();
 
     return [visualSummary && `Screen:\n${visualSummary}`, transcriptSummary && `Speech:\n${transcriptSummary}`]
       .filter(Boolean)
       .join('\n\n')
       .slice(-MAX_CONTEXT_CHARS);
-  }, [getTranscriptSummary, insights]);
-
-  const getScreenSummary = useCallback(() => {
-    const recentInsights = insights.slice(-5);
-    const visualSummary = recentInsights
-      .map((i) => `[${new Date(i.timestamp).toLocaleTimeString()}] ${i.summary}`)
-      .join('\n');
-
-    return visualSummary.slice(-MAX_CONTEXT_CHARS);
-  }, [insights]);
-
-  const getLiveNowSummary = useCallback(() => {
-    const latestInsight = insights[insights.length - 1];
-    const latestTranscript = transcriptSegments[transcriptSegments.length - 1];
-
-    const visualLine = latestInsight?.summary?.trim() || '';
-    const speechLine = latestTranscript?.text?.trim() || '';
-
-    if (visualLine && speechLine) {
-      return `${visualLine} Speaker says: ${speechLine}`.slice(0, MAX_LIVE_SUMMARY_CHARS);
-    }
-    if (speechLine) {
-      return `Speaker says: ${speechLine}`.slice(0, MAX_LIVE_SUMMARY_CHARS);
-    }
-    if (visualLine) {
-      return visualLine.slice(0, MAX_LIVE_SUMMARY_CHARS);
-    }
-
-    return '';
-  }, [insights, transcriptSegments]);
-
-  const getRecentCommitments = useCallback(
-    (windowMs = DEFAULT_COMMITMENTS_WINDOW_MS, maxItems = DEFAULT_COMMITMENTS_MAX_ITEMS) => {
-      const safeWindowMs = Number.isFinite(windowMs) ? Math.max(1000, Math.floor(windowMs)) : DEFAULT_COMMITMENTS_WINDOW_MS;
-      const safeMaxItems = Number.isFinite(maxItems) ? Math.max(1, Math.floor(maxItems)) : DEFAULT_COMMITMENTS_MAX_ITEMS;
-      const cutoff = Date.now() - safeWindowMs;
-      return commitments
-        .filter((item) => item.timestamp >= cutoff)
-        .sort((a, b) => b.timestamp - a.timestamp)
-        .slice(0, safeMaxItems)
-        .map((item) => item.text);
-    },
-    [commitments]
-  );
+  }, [getScreenSummary, getTranscriptSummary]);
 
   const reset = useCallback(() => {
     setInsights([]);
     setMessages([]);
     setContext('');
     setAllActionItems([]);
-    setCommitments([]);
+    setActionSignals([]);
+    setDecisionSignals([]);
+    setOpenQuestionSignals([]);
     setTranscriptSegments([]);
   }, []);
 
@@ -222,16 +302,18 @@ export function useMeetingContext() {
     messages,
     context,
     allActionItems,
+    actionSignals,
+    decisionSignals,
+    openQuestionSignals,
     transcriptSegments,
     addInsight,
+    addMeetingSignals,
     addActionItems,
     addMessage,
     addTranscriptSegment,
     getTranscriptSummary,
-    getContextSummary,
     getScreenSummary,
-    getLiveNowSummary,
-    getRecentCommitments,
+    getContextSummary,
     reset,
   };
 }

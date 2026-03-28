@@ -41,8 +41,14 @@ Rules:
 - keyPoints should have 1-3 items max.
 - suggestedQuestions should have 0-2 items.
 - actionItems should only include real tasks/todos.
+- If the screen shows assignments, deadlines, deliverables, checklists, rubric requirements, or next steps, extract 1-3 concise actionItems from the screen.
+- Prefer stable, canonical task wording so repeated views of the same assignment collapse cleanly. Example: "Submit Midterm Report by Wednesday 11:59pm" instead of several near-duplicates.
+- For rubric or assignment pages, group overlapping requirements into compact deliverables instead of listing every line item separately.
 - If the screen appears unchanged, prefer actionItems: [] to avoid spam, but still include explicit tasks when they are clearly actionable.
 - Avoid repeating the same task unless there is materially new detail (owner, deadline, scope, or status).
+- suggestedQuestions should only ask about information that is missing, ambiguous, or not clearly visible on the screen.
+- Do not ask suggestedQuestions about dates, deadlines, names, or requirements that are already explicitly shown.
+- When the screen clearly contains actionable work, prefer actionItems over suggestedQuestions.
 - factCheckFlags only for specific claims with numbers or controversial statements.
 - sceneSignature should stay the same if the screen is materially the same content with only minor scrolling or layout shifts.
 - If screen appears unchanged from context, note that briefly.`;

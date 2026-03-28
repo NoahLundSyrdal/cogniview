@@ -1,97 +1,101 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Input } from '@/components/ui/input';
-import { Button } from '@/components/ui/button';
 import InsightCard from './InsightCard';
-import ActionItems from './ActionItems';
 import MeetingControls from './MeetingControls';
 import FactCheckPanel from './FactCheckPanel';
+import AssistantCopilotChat from './AssistantCopilotChat';
 import type {
-  FrameAnalysis,
-  ChatMessage,
   FactCheckResult,
   FactCheckStatement,
+  FrameAnalysis,
   TranscriptSegment,
 } from '@/types';
 
 interface Props {
   insights: FrameAnalysis[];
-  messages: ChatMessage[];
+  chatMessageCount: number;
   isCapturing: boolean;
   isAnalyzing: boolean;
   isTranscribing: boolean;
-  transcriptError: string | null;
-  allActionItems: string[];
   transcriptSegments: TranscriptSegment[];
-  onSendMessage: (msg: string) => Promise<void>;
-  startTime: number | null;
+  finalSummary: string | null;
+  finalSummaryError: string | null;
+  isGeneratingSummary: boolean;
+  onGenerateSummary: () => void;
   factCheckClaims: string[];
   factCheckStatements: FactCheckStatement[];
   factCheckResults: FactCheckResult[];
   factCheckError: string | null;
+  factCheckStatus: string | null;
   isFactChecking: boolean;
   onRunFactCheck: () => Promise<void>;
+  meetingContext: string;
+  screenAnalysis: FrameAnalysis | null;
+  transcriptContext: string;
+  chatSessionId: string;
+  onChatMessageCountChange: (count: number) => void;
 }
 
-type Tab = 'insights' | 'actions' | 'chat' | 'factCheck';
+type Tab = 'insights' | 'chat' | 'factCheck' | 'summary';
 
 export default function CopilotSidebar({
   insights,
-  messages,
+  chatMessageCount,
   isCapturing,
   isAnalyzing,
   isTranscribing,
-  transcriptError,
-  allActionItems,
   transcriptSegments,
-  onSendMessage,
-  startTime,
+  finalSummary,
+  finalSummaryError,
+  isGeneratingSummary,
+  onGenerateSummary,
   factCheckClaims,
   factCheckStatements,
   factCheckResults,
   factCheckError,
+  factCheckStatus,
   isFactChecking,
   onRunFactCheck,
+  meetingContext,
+  screenAnalysis,
+  transcriptContext,
+  chatSessionId,
+  onChatMessageCountChange,
 }: Props) {
   const [tab, setTab] = useState<Tab>('insights');
-  const [input, setInput] = useState('');
-  const [isSending, setIsSending] = useState(false);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const hasAutoFocusedSummaryRef = useRef(false);
+  const showSummaryTab =
+    !isCapturing || isGeneratingSummary || Boolean(finalSummary) || Boolean(finalSummaryError);
+  const activeTab: Tab = !showSummaryTab && tab === 'summary' ? 'insights' : tab;
 
   useEffect(() => {
-    if (tab === 'chat') {
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (isCapturing) {
+      hasAutoFocusedSummaryRef.current = false;
+      return;
     }
-  }, [messages, tab]);
 
-  const handleSend = useCallback(async () => {
-    const msg = input.trim();
-    if (!msg || isSending) return;
-    setInput('');
-    setIsSending(true);
-    await onSendMessage(msg);
-    setIsSending(false);
-  }, [input, isSending, onSendMessage]);
+    if (hasAutoFocusedSummaryRef.current) return;
+    if (!isGeneratingSummary && !finalSummary && !finalSummaryError) return;
 
-  const handleKey = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
-    }
-  };
+    const frameId = requestAnimationFrame(() => {
+      setTab('summary');
+      hasAutoFocusedSummaryRef.current = true;
+    });
+
+    return () => cancelAnimationFrame(frameId);
+  }, [finalSummary, finalSummaryError, isCapturing, isGeneratingSummary]);
 
   const tabs: { id: Tab; label: string; count?: number }[] = [
     { id: 'insights', label: 'Insights', count: insights.length || undefined },
-    { id: 'actions', label: 'Actions', count: allActionItems.length || undefined },
-    { id: 'chat', label: 'Chat', count: messages.length || undefined },
+    { id: 'chat', label: 'Chat', count: chatMessageCount || undefined },
     { id: 'factCheck', label: 'Fact-check', count: factCheckResults.length || undefined },
+    ...(showSummaryTab ? [{ id: 'summary' as const, label: 'Summary' }] : []),
   ];
 
   return (
     <div className="w-80 flex flex-col border-l border-gray-800 bg-gray-900">
-      {/* Header */}
       <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <span className="text-sm font-semibold text-gray-100">Copilot</span>
@@ -114,14 +118,13 @@ export default function CopilotSidebar({
         />
       </div>
 
-      {/* Tabs */}
       <div className="flex border-b border-gray-800">
         {tabs.map(({ id, label, count }) => (
           <button
             key={id}
             onClick={() => setTab(id)}
             className={`flex-1 py-2 text-xs font-medium transition-colors ${
-              tab === id
+              activeTab === id
                 ? 'text-indigo-300 border-b-2 border-indigo-500'
                 : 'text-gray-500 hover:text-gray-300'
             }`}
@@ -130,7 +133,7 @@ export default function CopilotSidebar({
             {count !== undefined && (
               <span
                 className={`ml-1.5 px-1.5 py-0.5 rounded-full text-[10px] ${
-                  tab === id ? 'bg-indigo-500/30 text-indigo-300' : 'bg-gray-700 text-gray-400'
+                  activeTab === id ? 'bg-indigo-500/30 text-indigo-300' : 'bg-gray-700 text-gray-400'
                 }`}
               >
                 {count}
@@ -140,140 +143,64 @@ export default function CopilotSidebar({
         ))}
       </div>
 
-      {/* Content */}
       <div className="flex-1 min-h-0">
-        {tab === 'insights' && (
+        {activeTab === 'insights' && (
           <ScrollArea className="h-full">
             <div className="p-3 space-y-3">
               {insights.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 text-center gap-3">
                   <span className="text-3xl opacity-40">👁</span>
                   <p className="text-sm text-gray-500">
-                    {isCapturing
-                      ? 'Waiting for first frame...'
-                      : 'Start capture to see insights'}
+                    {isCapturing ? 'Waiting for first frame...' : 'Start capture to see insights'}
                   </p>
                 </div>
               ) : (
-                [...insights].reverse().map((insight, i) => (
-                  <InsightCard key={insight.timestamp} insight={insight} isLatest={i === 0} />
+                [...insights].reverse().map((insight, index) => (
+                  <InsightCard key={insight.timestamp} insight={insight} isLatest={index === 0} />
                 ))
               )}
             </div>
           </ScrollArea>
         )}
 
-        {tab === 'actions' && (
-          <ScrollArea className="h-full">
-            <div className="p-3 space-y-3">
-              <ActionItems items={allActionItems} />
-              {transcriptError && (
-                <div className="rounded border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-xs text-amber-200">
-                  {transcriptError}
-                </div>
-              )}
-              <MeetingControls
-                insights={insights}
-                actionItems={allActionItems}
-                transcriptSegments={transcriptSegments}
-                startTime={startTime}
-              />
-            </div>
-          </ScrollArea>
+        {activeTab === 'chat' && (
+          <AssistantCopilotChat
+            meetingContext={meetingContext}
+            screenAnalysis={screenAnalysis}
+            transcriptContext={transcriptContext}
+            sessionId={chatSessionId}
+            onMessageCountChange={onChatMessageCountChange}
+          />
         )}
 
-        {tab === 'chat' && (
-          <div className="flex flex-col h-full">
-            <ScrollArea className="flex-1">
-              <div className="p-3 space-y-3">
-                {messages.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center py-12 text-center gap-3">
-                    <span className="text-3xl opacity-40">💬</span>
-                    <p className="text-sm text-gray-500">Ask anything about what&apos;s on screen</p>
-                    <div className="space-y-1.5 text-left w-full">
-                      {[
-                        'What are the main takeaways?',
-                        'What question should I ask?',
-                        'Explain this slide',
-                      ].map((suggestion) => (
-                        <button
-                          key={suggestion}
-                          onClick={() => setInput(suggestion)}
-                          className="w-full text-left text-xs text-gray-500 border border-gray-700 rounded px-2 py-1.5 hover:border-indigo-500/50 hover:text-gray-300 transition-colors"
-                        >
-                          {suggestion}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                ) : (
-                  messages.map((msg) => (
-                    <div
-                      key={msg.id}
-                      className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                    >
-                      <div
-                        className={`max-w-[85%] rounded-lg px-3 py-2 text-xs leading-relaxed ${
-                          msg.role === 'user'
-                            ? 'bg-indigo-600 text-white'
-                            : 'bg-gray-800 text-gray-200 border border-gray-700'
-                        }`}
-                      >
-                        {msg.content}
-                      </div>
-                    </div>
-                  ))
-                )}
-                {isSending && (
-                  <div className="flex justify-start">
-                    <div className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
-                      <span className="flex gap-1">
-                        {[0, 1, 2].map((i) => (
-                          <span
-                            key={i}
-                            className="w-1 h-1 bg-gray-400 rounded-full animate-bounce"
-                            style={{ animationDelay: `${i * 150}ms` }}
-                          />
-                        ))}
-                      </span>
-                    </div>
-                  </div>
-                )}
-                <div ref={bottomRef} />
-              </div>
-            </ScrollArea>
-
-            <div className="p-3 border-t border-gray-800 flex gap-2">
-              <Input
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={handleKey}
-                placeholder="Ask about what's on screen..."
-                className="flex-1 bg-gray-800 border-gray-700 text-gray-100 placeholder-gray-500 text-xs h-8"
-              />
-              <Button
-                onClick={handleSend}
-                disabled={!input.trim() || isSending}
-                size="sm"
-                className="bg-indigo-600 hover:bg-indigo-500 text-white h-8 px-3 text-xs"
-              >
-                ↑
-              </Button>
-            </div>
-          </div>
-        )}
-
-        {tab === 'factCheck' && (
+        {activeTab === 'factCheck' && (
           <ScrollArea className="h-full">
             <FactCheckPanel
               isCapturing={isCapturing}
               isRunning={isFactChecking}
               error={factCheckError}
+              status={factCheckStatus}
               claims={factCheckClaims}
               statements={factCheckStatements}
               results={factCheckResults}
               onRun={onRunFactCheck}
             />
+          </ScrollArea>
+        )}
+
+        {activeTab === 'summary' && showSummaryTab && (
+          <ScrollArea className="h-full">
+            <div className="p-3">
+              <MeetingControls
+                isCapturing={isCapturing}
+                insights={insights}
+                transcriptSegments={transcriptSegments}
+                isGeneratingSummary={isGeneratingSummary}
+                summary={finalSummary}
+                summaryError={finalSummaryError}
+                onGenerateSummary={onGenerateSummary}
+              />
+            </div>
           </ScrollArea>
         )}
       </div>
