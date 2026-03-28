@@ -160,6 +160,61 @@ export async function transcribeAudio(params: {
   return transcription.text.trim();
 }
 
+export async function extractActionItemsFromTranscript(params: {
+  transcriptText: string;
+  meetingContext?: string;
+  maxItems?: number;
+}): Promise<string[]> {
+  const transcriptText = params.transcriptText.replace(/\s+/g, ' ').trim();
+  if (!transcriptText) return [];
+
+  const requestedMaxItems = params.maxItems ?? 5;
+  const maxItems = Math.max(1, Math.min(12, Math.floor(requestedMaxItems)));
+  const contextBlock = params.meetingContext?.trim()
+    ? `Meeting context:\n${params.meetingContext.trim()}\n\n`
+    : '';
+
+  const userPrompt = `${contextBlock}Transcript excerpt:
+${transcriptText}
+
+Extract only explicit action items from what speakers actually said.
+- Include only real tasks, follow-ups, decisions that imply work, or commitments.
+- Prefer concrete phrasing with owner/deadline only if explicitly spoken.
+- Do not invent tasks that were not stated.
+- Do not include generic advice, summaries, or discussion topics.
+- Deduplicate semantically similar items.
+- Return JSON only in this exact shape: {"actionItems":["..."]}.
+- Return at most ${maxItems} action items.`;
+
+  const raw = await completeText({
+    system: 'You extract action items from meeting transcripts and return strict JSON.',
+    user: userPrompt,
+    maxTokens: 700,
+  });
+  const jsonBlob = parseFirstJsonObject(raw);
+  if (!jsonBlob) return [];
+
+  try {
+    const parsed = JSON.parse(jsonBlob) as { actionItems?: unknown };
+    if (!Array.isArray(parsed.actionItems)) return [];
+    const seen = new Set<string>();
+    const items: string[] = [];
+    for (const item of parsed.actionItems) {
+      if (typeof item !== 'string') continue;
+      const clean = item.trim().replace(/\s+/g, ' ');
+      if (!clean) continue;
+      const key = clean.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      items.push(clean);
+      if (items.length >= maxItems) break;
+    }
+    return items;
+  } catch {
+    return [];
+  }
+}
+
 function parseFirstJsonObject(text: string): string | null {
   const trimmed = text.trim();
   if (!trimmed) return null;

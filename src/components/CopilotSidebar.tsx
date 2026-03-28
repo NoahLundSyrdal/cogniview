@@ -3,7 +3,6 @@
 import { useState } from 'react';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import InsightCard from './InsightCard';
-import ActionItems from './ActionItems';
 import MeetingControls from './MeetingControls';
 import FactCheckPanel from './FactCheckPanel';
 import AssistantCopilotChat from './AssistantCopilotChat';
@@ -16,6 +15,8 @@ interface Props {
   isAnalyzing: boolean;
   isTranscribing: boolean;
   allActionItems: string[];
+  liveNowSummary: string;
+  recentCommitments: string[];
   transcriptSegments: TranscriptSegment[];
   startTime: number | null;
   factCheckClaims: string[];
@@ -39,6 +40,8 @@ export default function CopilotSidebar({
   isAnalyzing,
   isTranscribing,
   allActionItems,
+  liveNowSummary,
+  recentCommitments,
   transcriptSegments,
   startTime,
   factCheckClaims,
@@ -173,7 +176,35 @@ export default function CopilotSidebar({
         {tab === 'actions' && (
           <ScrollArea className="h-full">
             <div className="p-3 space-y-3">
-              <ActionItems items={allActionItems} />
+              <div className="rounded-lg border border-gray-800 bg-gray-950/70 px-3 py-3 space-y-2">
+                <div className="text-[10px] uppercase tracking-[0.2em] text-gray-500">
+                  What is happening now
+                </div>
+                <p className="text-xs leading-relaxed text-gray-200 whitespace-pre-wrap">
+                  {liveNowSummary ||
+                    (isCapturing
+                      ? 'Listening and watching. Waiting for enough context to summarize this moment.'
+                      : 'Start capture to get a live summary of what is happening now.')}
+                </p>
+              </div>
+              <div className="rounded-lg border border-gray-800 bg-gray-950/70 px-3 py-3 space-y-2">
+                <div className="text-[10px] uppercase tracking-[0.2em] text-gray-500">
+                  New commitments (last 2 min)
+                </div>
+                {recentCommitments.length > 0 ? (
+                  <ul className="space-y-1.5 text-xs text-gray-200 list-disc pl-4">
+                    {recentCommitments.map((item) => (
+                      <li key={item} className="leading-relaxed">
+                        {item}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-xs leading-relaxed text-gray-500">
+                    No new commitments detected.
+                  </p>
+                )}
+              </div>
               <MeetingControls
                 insights={insights}
                 actionItems={allActionItems}
