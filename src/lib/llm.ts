@@ -241,8 +241,13 @@ export async function extractClaimsFromImage(params: {
           {
             type: 'input_text',
             text: `You extract factual claims from screenshots.
-- Keep only checkable factual statements (numbers, named entities, dates, concrete assertions).
-- Ignore opinions, vague marketing language, and instructions.
+- Keep only claims that are both checkable and high-value to verify.
+- Prioritize claims that are likely wrong, surprising, high-impact, or contentious.
+- Prioritize claims with specific numbers, percentages, dates, rankings, causal assertions, or strong superlatives.
+- Ignore obvious/common-knowledge claims that are very likely correct without verification.
+- Ignore generic statements, definitions, product slogans, and procedural instructions.
+- If nothing meaningfully needs fact-checking, return an empty list.
+- Rank by fact-check priority and keep only the top claims.
 - Deduplicate semantically similar claims.
 - Return JSON only in this shape: {"claims":["..."]}.
 - Keep each claim under 180 characters.
@@ -256,7 +261,8 @@ export async function extractClaimsFromImage(params: {
           {
             type: 'input_text',
             text: `${contextLine}
-Analyze the screenshot and extract claims that should be fact-checked.`,
+Analyze the screenshot and extract only the most important claims that actually need fact-checking.
+Do not include obvious claims.`,
           },
           { type: 'input_image', image_url: dataUrl },
         ],
