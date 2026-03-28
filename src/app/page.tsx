@@ -202,9 +202,6 @@ export default function Home() {
     insights,
     context,
     allActionItems,
-    actionSignals,
-    decisionSignals,
-    openQuestionSignals,
     transcriptSegments,
     addInsight,
     addMeetingSignals,
@@ -557,9 +554,6 @@ export default function Home() {
     isCapturing,
     isAnalyzing: isAnalyzing || activeTranscriptJobs > 0,
     isTranscribing: activeTranscriptJobs > 0,
-    actionSignals,
-    decisionSignals,
-    openQuestionSignals,
     transcriptSegments,
     finalSummary,
     finalSummaryError,
@@ -631,9 +625,8 @@ export default function Home() {
             <div className="relative z-10 mt-10 flex gap-6 text-center">
               {[
                 { label: 'Frames analyzed', value: insights.length },
-                { label: 'Transcripts', value: transcriptSegments.length },
-                { label: 'Action items', value: allActionItems.length },
-                { label: 'Messages', value: assistantChatMessageCount },
+                { label: 'Chat messages', value: assistantChatMessageCount },
+                { label: 'Fact-check results', value: factCheckResults.length },
               ].map(({ label, value }) => (
                 <div key={label} className="flex flex-col gap-0.5">
                   <span className="text-2xl font-bold text-indigo-300">{value}</span>
