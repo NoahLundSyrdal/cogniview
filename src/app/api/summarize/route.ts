@@ -3,10 +3,10 @@ import { NextRequest, NextResponse } from 'next/server';
 
 export async function POST(req: NextRequest) {
   try {
-    const { insights, actionItems, duration } = await req.json();
+    const { insights, actionItems, transcriptSegments, duration } = await req.json();
 
-    if (!insights?.length) {
-      return NextResponse.json({ error: 'No insights to summarize' }, { status: 400 });
+    if (!insights?.length && !transcriptSegments?.length) {
+      return NextResponse.json({ error: 'No meeting data to summarize' }, { status: 400 });
     }
 
     const insightText = insights
@@ -16,9 +16,19 @@ export async function POST(req: NextRequest) {
       )
       .join('\n\n');
 
+    const transcriptText = (transcriptSegments || [])
+      .map(
+        (segment: { timestamp: number; text: string }) =>
+          `[${new Date(segment.timestamp).toLocaleTimeString()}] ${segment.text}`
+      )
+      .join('\n');
+
     const userPrompt = `You are summarizing a meeting that lasted ${duration || 'unknown'} minutes. Here is a timeline of what was shown on screen:
 
 ${insightText}
+
+Transcript snippets from the meeting audio:
+${transcriptText || 'No transcript captured.'}
 
 Action items identified:
 ${(actionItems || []).map((item: string, i: number) => `${i + 1}. ${item}`).join('\n')}

@@ -5,8 +5,10 @@ import { Button } from '@/components/ui/button';
 interface Props {
   isCapturing: boolean;
   isAnalyzing: boolean;
+  isTranscribing: boolean;
   captureError: string | null;
   analysisError: string | null;
+  transcriptError: string | null;
   onStart: () => void;
   onStop: () => void;
 }
@@ -14,8 +16,10 @@ interface Props {
 export default function ScreenCapture({
   isCapturing,
   isAnalyzing,
+  isTranscribing,
   captureError,
   analysisError,
+  transcriptError,
   onStart,
   onStop,
 }: Props) {
@@ -54,17 +58,25 @@ export default function ScreenCapture({
           <p className="text-red-400 text-xs leading-snug">{captureError}</p>
         ) : isCapturing ? (
           <>
-            <p className="text-indigo-300 font-medium text-sm">Watching your screen</p>
-            {isAnalyzing ? (
-              <p className="text-gray-500 text-xs animate-pulse">Analyzing frame...</p>
+            <p className="text-indigo-300 font-medium text-sm">Watching and listening</p>
+            {isAnalyzing || isTranscribing ? (
+              <p className="text-gray-500 text-xs animate-pulse">
+                {isAnalyzing && isTranscribing
+                  ? 'Analyzing frames and transcribing audio...'
+                  : isAnalyzing
+                  ? 'Analyzing frame...'
+                  : 'Transcribing audio...'}
+              </p>
             ) : (
-              <p className="text-gray-500 text-xs">Next analysis in ~3s</p>
+              <p className="text-gray-500 text-xs">Next frame analysis in ~3s</p>
             )}
           </>
         ) : (
           <>
-            <p className="text-gray-300 font-medium text-sm">Ready to watch</p>
-            <p className="text-gray-500 text-xs">Analyzes your screen every 3 seconds</p>
+            <p className="text-gray-300 font-medium text-sm">Ready to watch and listen</p>
+            <p className="text-gray-500 text-xs">
+              Analyzes your screen and transcribes meeting audio
+            </p>
           </>
         )}
       </div>
@@ -73,6 +85,11 @@ export default function ScreenCapture({
       {analysisError && (
         <div className="max-w-xs bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2 text-xs text-red-300 text-center leading-snug">
           {analysisError}
+        </div>
+      )}
+      {transcriptError && (
+        <div className="max-w-xs bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2 text-xs text-amber-200 text-center leading-snug">
+          {transcriptError}
         </div>
       )}
 
@@ -96,11 +113,12 @@ export default function ScreenCapture({
 
       {/* How it works */}
       {!isCapturing && !captureError && (
-        <div className="grid grid-cols-3 gap-4 mt-4 max-w-sm text-center">
+        <div className="grid grid-cols-2 gap-4 mt-4 max-w-md text-center sm:grid-cols-4">
           {[
             { icon: '📸', label: 'Captures frames', sub: 'every 3 seconds' },
+            { icon: '🎙', label: 'Records audio', sub: 'screen + mic when allowed' },
             { icon: '🔍', label: 'Gemini Vision', sub: 'analyzes content' },
-            { icon: '💬', label: 'Claude AI', sub: 'answers questions' },
+            { icon: '📝', label: '4o Transcribe', sub: 'turns speech into text' },
           ].map((item) => (
             <div key={item.label} className="flex flex-col items-center gap-1">
               <span className="text-2xl">{item.icon}</span>

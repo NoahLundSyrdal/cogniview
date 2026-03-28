@@ -16,6 +16,13 @@ export interface ChatMessage {
   timestamp: number;
 }
 
+export interface TranscriptSegment {
+  id: string;
+  text: string;
+  timestamp: number;
+  durationSeconds?: number;
+}
+
 export interface MeetingState {
   isCapturing: boolean;
   isAnalyzing: boolean;
@@ -23,4 +30,5 @@ export interface MeetingState {
   messages: ChatMessage[];
   context: string;
   allActionItems: string[];
+  transcriptSegments: TranscriptSegment[];
 }

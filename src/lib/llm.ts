@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
+import type { Uploadable } from 'openai/uploads';
 
 type Provider = 'anthropic' | 'openai';
 
@@ -136,4 +137,24 @@ export async function completeVision(params: {
   });
   const text = response.choices[0]?.message?.content;
   return typeof text === 'string' ? text.trim() : '';
+}
+
+export async function transcribeAudio(params: {
+  file: Uploadable;
+  prompt?: string;
+}): Promise<string> {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    throw new Error('OPENAI_API_KEY is required for transcription with gpt-4o-transcribe.');
+  }
+
+  const openai = new OpenAI({ apiKey });
+  const model = process.env.OPENAI_TRANSCRIBE_MODEL || 'gpt-4o-transcribe';
+  const transcription = await openai.audio.transcriptions.create({
+    file: params.file,
+    model,
+    ...(params.prompt ? { prompt: params.prompt } : {}),
+  });
+
+  return transcription.text.trim();
 }
