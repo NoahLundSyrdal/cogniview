@@ -8,6 +8,7 @@ from typing import Any
 
 import railtracks as rt
 from pydantic import BaseModel, Field
+from runtime_memory import load_lessons, remember_lessons
 
 MAX_INSIGHTS = 12
 MAX_TRANSCRIPT_SEGMENTS = 24
@@ -75,10 +76,32 @@ class MeetingTranscriptSegment(BaseModel):
     text: str | None = None
 
 
+class MeetingFactCheckStatement(BaseModel):
+    claim: str | None = None
+    source: str | None = None
+    priority: int | None = None
+
+
+class MeetingFactCheckResult(BaseModel):
+    claim: str | None = None
+    source: str | None = None
+    verdict: str | None = None
+    confidence: float | None = None
+    summary: str | None = None
+
+
+class MeetingFactCheckRun(BaseModel):
+    timestamp: int | None = None
+    claims: list[str] = Field(default_factory=list)
+    statements: list[MeetingFactCheckStatement] = Field(default_factory=list)
+    results: list[MeetingFactCheckResult] = Field(default_factory=list)
+
+
 class MeetingSummaryRequest(BaseModel):
     insights: list[MeetingInsight] = Field(default_factory=list)
     actionItems: list[str] = Field(default_factory=list)
     transcriptSegments: list[MeetingTranscriptSegment] = Field(default_factory=list)
+    factCheckRuns: list[MeetingFactCheckRun] = Field(default_factory=list)
     duration: int | None = Field(default=None, ge=1)
 
 
@@ -90,6 +113,7 @@ class SummaryContext(BaseModel):
     duration_label: str
     shown_timeline: str
     transcript_timeline: str
+    fact_check_text: str
     commitments_text: str
     visible_actions_text: str
     notable_questions_text: str
@@ -104,6 +128,10 @@ class SummaryReview(BaseModel):
 
 class ActionItemsResponse(BaseModel):
     actionItems: list[str] = Field(default_factory=list)
+
+
+class MemoryLessonsResponse(BaseModel):
+    lessons: list[str] = Field(default_factory=list)
 
 
 def _clean_text(value: Any) -> str:
@@ -281,8 +309,34 @@ def _parse_action_items_response(raw_text: str, fallback: list[str]) -> list[str
     return action_items or fallback
 
 
+def _parse_lessons_response(raw_text: str) -> list[str]:
+    parsed = _parse_first_json_object(raw_text)
+    if not parsed:
+        return []
+
+    try:
+        payload = json.loads(parsed)
+    except json.JSONDecodeError:
+        return []
+
+    if not isinstance(payload, dict):
+        return []
+
+    return _clean_items(payload.get("lessons"), limit=3)
+
+
 def _missing_required_sections(summary: str) -> list[str]:
     return [heading for heading in REQUIRED_SECTION_HEADINGS if heading not in summary]
+
+
+@rt.function_node
+async def load_summary_improvement_lessons(limit: int = 6) -> list[str]:
+    return load_lessons("summary", limit=limit)
+
+
+@rt.function_node
+async def remember_summary_improvement_lessons(lessons: list[str]) -> list[str]:
+    return remember_lessons("summary", _clean_items(lessons, limit=6))
 
 
 @rt.function_node
@@ -290,6 +344,7 @@ async def build_summary_context(
     insights: list[MeetingInsight],
     transcript_segments: list[MeetingTranscriptSegment],
     action_items: list[str],
+    fact_check_runs: list[MeetingFactCheckRun],
     duration: int | None = None,
 ) -> SummaryContext:
     unique_insights: list[MeetingInsight] = []
@@ -330,6 +385,35 @@ async def build_summary_context(
         for segment in selected_transcript_segments
     ]
 
+    fact_check_lines: list[str] = []
+    seen_fact_check_keys: set[str] = set()
+    for run in fact_check_runs[-4:]:
+        run_lines: list[str] = []
+        for result in run.results:
+            claim = _clean_text(result.claim)
+            verdict = _clean_text(result.verdict)
+            summary = _clean_text(result.summary)
+            if not claim or not verdict:
+                continue
+            dedupe_key = _normalize_summary_key(f"{claim} {verdict}")
+            if dedupe_key in seen_fact_check_keys:
+                continue
+            seen_fact_check_keys.add(dedupe_key)
+            confidence_label = (
+                f"{int(result.confidence * 100)}%"
+                if isinstance(result.confidence, (int, float))
+                else "unknown confidence"
+            )
+            run_lines.append(
+                f"- {claim} [{verdict}, {confidence_label}]"
+                + (f": {summary}" if summary else "")
+            )
+
+        if run_lines:
+            fact_check_lines.append(
+                f"[{_format_timestamp(run.timestamp)}]\n" + "\n".join(run_lines)
+            )
+
     commitments = _clean_items(action_items, limit=MAX_ACTION_ITEMS)
     candidate_action_items = _clean_items([*commitments, *visible_actions], limit=MAX_ACTION_ITEMS)
 
@@ -337,6 +421,7 @@ async def build_summary_context(
         duration_label=f"{duration} minutes" if duration else "unknown duration",
         shown_timeline="\n\n".join(shown_lines) or "No screen activity captured.",
         transcript_timeline="\n".join(transcript_lines) or "No transcript captured.",
+        fact_check_text="\n\n".join(fact_check_lines) or "No fact-check findings captured.",
         commitments_text="\n".join(f"- {item}" for item in commitments)
         or "- No explicit commitments captured.",
         visible_actions_text="\n".join(f"- {item}" for item in _clean_items(visible_actions, limit=12))
@@ -389,6 +474,7 @@ Merge overlapping tasks that refer to the same assignment, deliverable, or deadl
 async def draft_final_summary(
     context: SummaryContext,
     consolidated_action_items: list[str],
+    prior_lessons: list[str],
 ) -> str:
     writer = rt.agent_node(
         "Meeting Summary Writer",
@@ -414,13 +500,24 @@ async def draft_final_summary(
         if consolidated_action_items
         else "- No explicit commitments captured."
     )
+    lessons_text = (
+        "\n".join(f"- {lesson}" for lesson in _clean_items(prior_lessons, limit=6))
+        if prior_lessons
+        else "- No prior lessons stored yet."
+    )
     prompt = f"""Write the final summary for a completed meeting lasting {context.duration_label}.
+
+Improvement lessons learned from earlier meetings:
+{lessons_text}
 
 Visible timeline:
 {context.shown_timeline}
 
 Transcript timeline:
 {context.transcript_timeline}
+
+Fact-check findings:
+{context.fact_check_text}
 
 Consolidated commitments and action items:
 {consolidated_actions_text}
@@ -433,7 +530,9 @@ Outstanding or suggested questions:
 
 Make the result feel like one coherent closing recap, not disconnected notes.
 Only include todo items when the meeting clearly assigned or committed to follow-up work.
-Keep action items compact and deduplicated."""
+Keep action items compact and deduplicated.
+If fact-check findings were captured, weave the most important verified or contradicted claims into the relevant sections.
+Apply earlier lessons when they are relevant, but do not mention those lessons verbatim in the summary."""
 
     result = await rt.call(writer, prompt)
     return result.text.strip()
@@ -444,6 +543,7 @@ async def review_final_summary(
     context: SummaryContext,
     draft_summary: str,
     consolidated_action_items: list[str],
+    prior_lessons: list[str],
 ) -> SummaryReview:
     reviewer = rt.agent_node(
         "Meeting Summary Reviewer",
@@ -464,6 +564,11 @@ async def review_final_summary(
         if consolidated_action_items
         else "- No explicit commitments captured."
     )
+    lessons_text = (
+        "\n".join(f"- {lesson}" for lesson in _clean_items(prior_lessons, limit=6))
+        if prior_lessons
+        else "- No prior lessons stored yet."
+    )
     prompt = f"""Review this meeting summary draft.
 
 Context to cover:
@@ -473,6 +578,9 @@ Visible timeline:
 Transcript timeline:
 {context.transcript_timeline}
 
+Fact-check findings:
+{context.fact_check_text}
+
 Commitments:
 {consolidated_actions_text}
 
@@ -481,6 +589,9 @@ Visible action items:
 
 Outstanding or suggested questions:
 {context.notable_questions_text}
+
+Previously learned improvement lessons:
+{lessons_text}
 
 Draft summary:
 {draft_summary}
@@ -495,10 +606,63 @@ Return JSON:
   "revised_summary": "full markdown summary using the exact required section headings"
 }}
 
-Set passes to false if the draft misses important spoken content, visible work, decisions, or required sections."""
+Set passes to false if the draft misses important spoken content, visible work, fact-check findings, decisions, or required sections."""
 
     result = await rt.call(reviewer, prompt)
     return _parse_review(result.text.strip(), draft_summary)
+
+
+@rt.function_node
+async def distill_summary_improvement_lessons(
+    context: SummaryContext,
+    draft_summary: str,
+    review: SummaryReview,
+    prior_lessons: list[str],
+) -> list[str]:
+    if review.passes and not _clean_text(review.feedback):
+        return []
+
+    distiller = rt.agent_node(
+        "Meeting Summary Improvement Distiller",
+        llm=_create_summary_llm(),
+        system_message=(
+            "You convert summary review outcomes into compact reusable lessons for future summary runs. "
+            "Return valid JSON only in the shape {\"lessons\":[\"...\"]}. "
+            "Lessons must be general rules, not meeting-specific facts. "
+            "Good lesson: 'When the transcript is sparse, explicitly say spoken detail was limited instead of implying more was said.' "
+            "Bad lesson: 'Mention climate change in the overview.' "
+            "Return 0-3 lessons and avoid repeating prior lessons."
+        ),
+    )
+    lessons_text = (
+        "\n".join(f"- {lesson}" for lesson in _clean_items(prior_lessons, limit=6))
+        if prior_lessons
+        else "- No prior lessons stored yet."
+    )
+    prompt = f"""Distill reusable improvement lessons from this summary run.
+
+Prior stored lessons:
+{lessons_text}
+
+Visible timeline:
+{context.shown_timeline}
+
+Transcript timeline:
+{context.transcript_timeline}
+
+Draft summary:
+{draft_summary}
+
+Reviewer feedback:
+{review.feedback or 'Reviewer passed the summary without extra feedback.'}
+
+Reviewer revised summary:
+{review.revised_summary or 'No revised summary provided.'}
+
+Return only lessons that would improve future meeting summaries."""
+
+    result = await rt.call(distiller, prompt)
+    return _parse_lessons_response(result.text.strip())
 
 
 @rt.function_node
@@ -506,13 +670,16 @@ async def create_final_meeting_summary(
     insights: list[MeetingInsight],
     action_items: list[str],
     transcript_segments: list[MeetingTranscriptSegment],
+    fact_check_runs: list[MeetingFactCheckRun],
     duration: int | None = None,
 ) -> str:
+    prior_lessons = await rt.call(load_summary_improvement_lessons, 6)
     context = await rt.call(
         build_summary_context,
         insights=insights,
         transcript_segments=transcript_segments,
         action_items=action_items,
+        fact_check_runs=fact_check_runs,
         duration=duration,
     )
     consolidated_action_items = await rt.call(
@@ -523,13 +690,24 @@ async def create_final_meeting_summary(
         draft_final_summary,
         context=context,
         consolidated_action_items=consolidated_action_items,
+        prior_lessons=prior_lessons,
     )
     review = await rt.call(
         review_final_summary,
         context=context,
         draft_summary=draft_summary,
         consolidated_action_items=consolidated_action_items,
+        prior_lessons=prior_lessons,
     )
+    distilled_lessons = await rt.call(
+        distill_summary_improvement_lessons,
+        context=context,
+        draft_summary=draft_summary,
+        review=review,
+        prior_lessons=prior_lessons,
+    )
+    if distilled_lessons:
+        await rt.call(remember_summary_improvement_lessons, distilled_lessons)
 
     candidate = (review.revised_summary or draft_summary).strip()
     if _missing_required_sections(candidate):

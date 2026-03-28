@@ -10,11 +10,12 @@ type FactCheckRequestPayload = {
   screenContext?: string;
   transcriptContext?: string;
   maxClaims?: number;
+  mode?: 'background' | 'interactive';
 };
 
 export async function POST(req: NextRequest) {
   try {
-    const { frame, meetingContext, screenContext, transcriptContext, maxClaims } =
+    const { frame, meetingContext, screenContext, transcriptContext, maxClaims, mode } =
       (await req.json()) as FactCheckRequestPayload;
     if (!frame || typeof frame !== 'string') {
       return NextResponse.json({ error: 'No frame provided' }, { status: 400 });
@@ -28,6 +29,7 @@ export async function POST(req: NextRequest) {
       ...(typeof maxClaims === 'number' && Number.isFinite(maxClaims) && maxClaims > 0
         ? { maxClaims: Math.floor(maxClaims) }
         : {}),
+      ...(mode === 'background' || mode === 'interactive' ? { mode } : {}),
     };
 
     if (process.env.RAILTRACKS_AGENT_URL?.trim()) {

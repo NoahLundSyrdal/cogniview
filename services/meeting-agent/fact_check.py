@@ -7,6 +7,7 @@ from typing import Any, Literal
 import railtracks as rt
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
+from runtime_memory import load_lessons, remember_lessons
 
 FactCheckVerdict = Literal[
     "supported",
@@ -14,6 +15,7 @@ FactCheckVerdict = Literal[
     "mixed",
     "insufficient_evidence",
 ]
+FactCheckMode = Literal["interactive", "background"]
 FactCheckStatementSource = Literal["voice", "visual"]
 
 
@@ -50,6 +52,7 @@ class FactCheckRequest(BaseModel):
     screenContext: str | None = None
     transcriptContext: str | None = None
     maxClaims: int | None = Field(default=None, ge=1, le=10)
+    mode: FactCheckMode = "interactive"
 
 
 class ClaimEvidence(BaseModel):
@@ -64,6 +67,10 @@ class ClaimEvidence(BaseModel):
 class ValidationOutcome(BaseModel):
     passes: bool
     feedback: str = ""
+
+
+class MemoryLessonsResponse(BaseModel):
+    lessons: list[str] = Field(default_factory=list)
 
 
 def _clean_text(value: Any, fallback: str = "") -> str:
@@ -139,6 +146,7 @@ def _merge_statements(
     voice_statements: list[FactCheckStatement],
     *,
     total_max_items: int,
+    prefer_voice_first: bool = False,
 ) -> list[FactCheckStatement]:
     merged: list[FactCheckStatement] = []
     seen: set[str] = set()
@@ -149,12 +157,20 @@ def _merge_statements(
         visual_index < len(visual_statements) or voice_index < len(voice_statements)
     ):
         batch: list[FactCheckStatement] = []
-        if visual_index < len(visual_statements):
-            batch.append(visual_statements[visual_index])
-            visual_index += 1
-        if voice_index < len(voice_statements):
-            batch.append(voice_statements[voice_index])
-            voice_index += 1
+        if prefer_voice_first:
+            if voice_index < len(voice_statements):
+                batch.append(voice_statements[voice_index])
+                voice_index += 1
+            if visual_index < len(visual_statements):
+                batch.append(visual_statements[visual_index])
+                visual_index += 1
+        else:
+            if visual_index < len(visual_statements):
+                batch.append(visual_statements[visual_index])
+                visual_index += 1
+            if voice_index < len(voice_statements):
+                batch.append(voice_statements[voice_index])
+                voice_index += 1
 
         for statement in batch:
             key = f"{statement.source}:{statement.claim.lower()}"
@@ -207,6 +223,22 @@ def _parse_first_json_object(text: str) -> str | None:
                 return trimmed[start : index + 1]
 
     return None
+
+
+def _parse_lessons_response(text: str) -> list[str]:
+    json_blob = _parse_first_json_object(text)
+    if not json_blob:
+        return []
+
+    try:
+        payload = json.loads(json_blob)
+    except json.JSONDecodeError:
+        return []
+
+    if not isinstance(payload, dict):
+        return []
+
+    return _clean_items(payload.get("lessons"), limit=3)
 
 
 def _read_response_output_text(response: Any) -> str:
@@ -391,6 +423,16 @@ def _create_factcheck_llm():
         or "gpt-5.4"
     )
     return rt.llm.OpenAILLM(model_name=model_name, api_key=api_key, temperature=0)
+
+
+@rt.function_node
+async def load_fact_check_improvement_lessons(limit: int = 6) -> list[str]:
+    return load_lessons("fact_check", limit=limit)
+
+
+@rt.function_node
+async def remember_fact_check_improvement_lessons(lessons: list[str]) -> list[str]:
+    return remember_lessons("fact_check", _clean_items(lessons, limit=6))
 
 
 async def _create_openai_response_with_web_search(
@@ -643,6 +685,7 @@ async def synthesize_fact_check_result(
     evidence: ClaimEvidence,
     meeting_context: str | None = None,
     review_feedback: str | None = None,
+    prior_lessons: list[str] | None = None,
 ) -> FactCheckResult:
     agent = rt.agent_node(
         "Fact-check Judge",
@@ -677,8 +720,16 @@ async def synthesize_fact_check_result(
         if isinstance(review_feedback, str) and review_feedback.strip()
         else ""
     )
+    lessons_line = (
+        "Improvement lessons from earlier fact-check runs:\n"
+        + "\n".join(f"- {lesson}" for lesson in _clean_items(prior_lessons or [], limit=6))
+        + "\n\n"
+        if prior_lessons
+        else ""
+    )
     prompt = (
         f"{context_line}"
+        f"{lessons_line}"
         f"Claim:\n{claim}\n\n"
         f"{feedback_line}"
         f"{_format_evidence_for_prompt(evidence)}"
@@ -768,12 +819,70 @@ async def review_fact_check_result(
 
 
 @rt.function_node
+async def distill_fact_check_improvement_lessons(
+    claim: str,
+    source: FactCheckStatementSource,
+    evidence: ClaimEvidence,
+    candidate: FactCheckResult,
+    review_feedback: str,
+    prior_lessons: list[str],
+) -> list[str]:
+    feedback = _clean_text(review_feedback)
+    if not feedback:
+        return []
+
+    distiller = rt.agent_node(
+        "Fact-check Improvement Distiller",
+        llm=_create_factcheck_llm(),
+        system_message=(
+            "You convert fact-check review feedback into compact reusable lessons for future fact-check runs. "
+            "Return valid JSON only in the shape {\"lessons\":[\"...\"]}. "
+            "Lessons must be general rules, not claim-specific facts or URLs. "
+            "Good lesson: 'Use insufficient_evidence when the source bundle is indirect or sparse.' "
+            "Bad lesson: 'Volcanoes do not cause most climate change.' "
+            "Return 0-3 lessons and avoid repeating prior lessons."
+        ),
+    )
+    lessons_text = (
+        "\n".join(f"- {lesson}" for lesson in _clean_items(prior_lessons, limit=6))
+        if prior_lessons
+        else "- No prior lessons stored yet."
+    )
+    prompt = f"""Distill reusable lessons from this fact-check review.
+
+Prior stored lessons:
+{lessons_text}
+
+Claim:
+{claim}
+
+Claim source:
+{source}
+
+Candidate result:
+{candidate.model_dump_json(indent=2)}
+
+Evidence bundle:
+{evidence.model_dump_json(indent=2)}
+
+Review feedback:
+{feedback}
+
+Return only general lessons that would improve future fact-checks."""
+
+    result = await rt.call(distiller, prompt)
+    return _parse_lessons_response(result.text.strip())
+
+
+@rt.function_node
 async def fact_check_single_claim(
     claim: str,
     source: FactCheckStatementSource = "visual",
     meeting_context: str | None = None,
     max_attempts: int = 2,
+    enable_review: bool = True,
 ) -> FactCheckResult:
+    prior_lessons = await rt.call(load_fact_check_improvement_lessons, 6)
     evidence = await rt.call(gather_claim_evidence, claim, meeting_context)
     if (
         not evidence.sources
@@ -787,8 +896,31 @@ async def fact_check_single_claim(
             summary="No meaningful evidence was gathered for this claim.",
         )
 
+    if not enable_review:
+        candidate = await rt.call(
+            synthesize_fact_check_result,
+            claim,
+            source,
+            evidence,
+            meeting_context,
+            None,
+            prior_lessons,
+        )
+        programmatic_feedback = _build_programmatic_feedback(candidate, evidence)
+        if programmatic_feedback:
+            fallback_summary = candidate.summary or evidence.summary or programmatic_feedback
+            return _fallback_result(
+                claim,
+                source=source,
+                summary=fallback_summary,
+                confidence=min(candidate.confidence, 0.35),
+                sources=candidate.sources[:3] or evidence.sources[:3],
+            )
+        return candidate
+
     attempts = max(1, max_attempts)
     review_feedback: str | None = None
+    last_validation_feedback: str = ""
     last_candidate: FactCheckResult | None = None
 
     for _ in range(attempts):
@@ -799,6 +931,7 @@ async def fact_check_single_claim(
             evidence,
             meeting_context,
             review_feedback,
+            prior_lessons,
         )
         last_candidate = candidate
         validation = await rt.call(
@@ -809,13 +942,39 @@ async def fact_check_single_claim(
             meeting_context,
         )
         if validation.passes:
+            feedback_to_store = _clean_text(last_validation_feedback or review_feedback or "")
+            if feedback_to_store:
+                distilled_lessons = await rt.call(
+                    distill_fact_check_improvement_lessons,
+                    claim,
+                    source,
+                    evidence,
+                    candidate,
+                    feedback_to_store,
+                    prior_lessons,
+                )
+                if distilled_lessons:
+                    await rt.call(remember_fact_check_improvement_lessons, distilled_lessons)
             return candidate
 
         review_feedback = validation.feedback or (
             "Be more conservative and ground the verdict more tightly in the evidence bundle."
         )
+        last_validation_feedback = review_feedback
 
     if last_candidate and last_candidate.verdict == "insufficient_evidence":
+        if last_validation_feedback:
+            distilled_lessons = await rt.call(
+                distill_fact_check_improvement_lessons,
+                claim,
+                source,
+                evidence,
+                last_candidate,
+                last_validation_feedback,
+                prior_lessons,
+            )
+            if distilled_lessons:
+                await rt.call(remember_fact_check_improvement_lessons, distilled_lessons)
         return last_candidate
 
     fallback_sources = (
@@ -829,6 +988,19 @@ async def fact_check_single_claim(
     if last_candidate is not None and last_candidate.summary:
         fallback_summary = f"{last_candidate.summary} Validation remained inconclusive."
 
+    if last_candidate is not None and last_validation_feedback:
+        distilled_lessons = await rt.call(
+            distill_fact_check_improvement_lessons,
+            claim,
+            source,
+            evidence,
+            last_candidate,
+            last_validation_feedback,
+            prior_lessons,
+        )
+        if distilled_lessons:
+            await rt.call(remember_fact_check_improvement_lessons, distilled_lessons)
+
     return _fallback_result(
         claim,
         source=source,
@@ -839,33 +1011,156 @@ async def fact_check_single_claim(
 
 
 @rt.function_node
+async def quick_fact_check_single_claim(
+    claim: str,
+    source: FactCheckStatementSource = "visual",
+    meeting_context: str | None = None,
+) -> FactCheckResult:
+    client = _create_openai_client()
+    model = (
+        os.getenv("OPENAI_FACTCHECK_BACKGROUND_REASONING_MODEL")
+        or os.getenv("OPENAI_FACTCHECK_REASONING_MODEL")
+        or "gpt-5.4"
+    )
+    context_line = (
+        f"Meeting context:\n{meeting_context.strip()}\n\n"
+        if isinstance(meeting_context, str) and meeting_context.strip()
+        else ""
+    )
+
+    response = await _create_openai_response_with_web_search(
+        client,
+        {
+            "model": model,
+            "input": [
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": (
+                                "You are a fast fact-checker for a live presentation copilot.\n"
+                                "- Search the web quickly and prefer primary or highly reputable sources.\n"
+                                "- Return JSON only in this exact shape:\n"
+                                "{\n"
+                                '  "verdict":"supported|contradicted|mixed|insufficient_evidence",\n'
+                                '  "confidence":0.0,\n'
+                                '  "summary":"1-2 sentences",\n'
+                                '  "sources":[{"title":"...","url":"https://...","snippet":"..."}]\n'
+                                "}\n"
+                                "- Be conservative when evidence is incomplete.\n"
+                                "- Include at most 3 sources."
+                            ),
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": f'{context_line}Fact-check this claim:\n"{claim}"',
+                        }
+                    ],
+                },
+            ],
+            "max_output_tokens": 900,
+        },
+    )
+
+    raw = _read_response_output_text(response)
+    json_blob = _parse_first_json_object(raw)
+    if not json_blob:
+        return _fallback_result(
+            claim,
+            source=source,
+            summary=raw or "The quick fact-check did not return a structured verdict.",
+        )
+
+    try:
+        payload = json.loads(json_blob)
+    except json.JSONDecodeError:
+        return _fallback_result(
+            claim,
+            source=source,
+            summary=raw or "The quick fact-check returned malformed output.",
+        )
+
+    verdict = _normalize_verdict(payload.get("verdict"))
+    confidence = _clamp_confidence(
+        payload.get("confidence"),
+        fallback=0.35 if verdict == "insufficient_evidence" else 0.55,
+    )
+    summary = _clean_text(
+        payload.get("summary"),
+        "The quick fact-check could not produce a confident verdict.",
+    )
+    sources = _normalize_sources(payload.get("sources"), limit=3)
+
+    if verdict != "insufficient_evidence" and not sources:
+        return _fallback_result(
+            claim,
+            source=source,
+            summary=summary,
+            confidence=min(confidence, 0.35),
+        )
+
+    return FactCheckResult(
+        claim=claim,
+        source=source,
+        verdict=verdict,
+        confidence=confidence,
+        summary=summary[:320],
+        sources=sources,
+    )
+
+
+@rt.function_node
 async def fact_check_latest_frame(
     frame: str,
     meeting_context: str | None = None,
     screen_context: str | None = None,
     transcript_context: str | None = None,
     max_claims: int | None = None,
+    mode: FactCheckMode = "interactive",
 ) -> FactCheckResponse:
-    resolved_max_claims = max_claims or _parse_env_int("FACTCHECK_MAX_CLAIMS", 5)
+    is_background = mode == "background"
+    resolved_max_claims = max_claims or _parse_env_int(
+        "FACTCHECK_BACKGROUND_MAX_CLAIMS" if is_background else "FACTCHECK_MAX_CLAIMS",
+        1 if is_background else 5,
+    )
     max_visual_statements = _parse_env_int(
-        "FACTCHECK_MAX_VISUAL_STATEMENTS",
+        "FACTCHECK_BACKGROUND_MAX_VISUAL_STATEMENTS"
+        if is_background
+        else "FACTCHECK_MAX_VISUAL_STATEMENTS",
         resolved_max_claims,
     )
     max_voice_statements = _parse_env_int(
-        "FACTCHECK_MAX_VOICE_STATEMENTS",
+        "FACTCHECK_BACKGROUND_MAX_VOICE_STATEMENTS"
+        if is_background
+        else "FACTCHECK_MAX_VOICE_STATEMENTS",
         resolved_max_claims,
     )
     enable_transcript_extraction = _parse_env_bool(
         "ENABLE_TRANSCRIPT_FACTCHECK_EXTRACTION",
         True,
     )
-    max_attempts = _parse_env_int("FACTCHECK_VALIDATION_ATTEMPTS", 2)
+    max_attempts = (
+        1
+        if is_background
+        else _parse_env_int("FACTCHECK_VALIDATION_ATTEMPTS", 2)
+    )
+    enable_review = False if is_background else _parse_env_bool("FACTCHECK_ENABLE_REVIEW", True)
 
-    visual_claims = await rt.call(
-        extract_claims_from_frame,
-        frame,
-        screen_context,
-        min(resolved_max_claims, max_visual_statements),
+    visual_claims = (
+        []
+        if is_background and bool(_clean_text(transcript_context))
+        else await rt.call(
+            extract_claims_from_frame,
+            frame,
+            screen_context,
+            min(resolved_max_claims, max_visual_statements),
+        )
     )
     voice_claims = (
         await rt.call(
@@ -892,20 +1187,31 @@ async def fact_check_latest_frame(
         visual_statements,
         voice_statements,
         total_max_items=resolved_max_claims,
+        prefer_voice_first=is_background and bool(_clean_text(transcript_context)),
     )
     if not statements:
         return FactCheckResponse()
 
     claims = [statement.claim for statement in statements]
     sources = [statement.source for statement in statements]
-    results = await rt.call_batch(
-        fact_check_single_claim,
-        claims,
-        sources,
-        [meeting_context] * len(claims),
-        [max_attempts] * len(claims),
-        return_exceptions=True,
-    )
+    if is_background:
+        results = await rt.call_batch(
+            quick_fact_check_single_claim,
+            claims,
+            sources,
+            [meeting_context] * len(claims),
+            return_exceptions=True,
+        )
+    else:
+        results = await rt.call_batch(
+            fact_check_single_claim,
+            claims,
+            sources,
+            [meeting_context] * len(claims),
+            [max_attempts] * len(claims),
+            [enable_review] * len(claims),
+            return_exceptions=True,
+        )
 
     normalized_results: list[FactCheckResult] = []
     for statement, result in zip(statements, results):
