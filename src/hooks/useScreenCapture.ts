@@ -3,7 +3,7 @@
 import { useState, useRef, useCallback } from 'react';
 
 const FRAME_INTERVAL_MS = 3000;
-const AUDIO_TIMESLICE_MS = 10000;
+const AUDIO_TIMESLICE_MS = 5000;
 const MIN_AUDIO_CHUNK_BYTES = 2048;
 const AUDIO_MIME_TYPES = [
   'audio/webm;codecs=opus',

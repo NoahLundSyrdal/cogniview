@@ -5,6 +5,16 @@ import type { FrameAnalysis, ChatMessage, TranscriptSegment } from '@/types';
 
 const MAX_CONTEXT_CHARS = 2000;
 const MAX_TRANSCRIPT_SEGMENTS = 80;
+const TRANSCRIPT_MERGE_WINDOW_MS = 12000;
+
+function mergeTranscriptText(existing: string, incoming: string) {
+  if (!existing) return incoming;
+  if (!incoming) return existing;
+  if (existing === incoming) return existing;
+  if (existing.endsWith(incoming)) return existing;
+  if (incoming.startsWith(existing)) return incoming;
+  return `${existing} ${incoming}`.replace(/\s+/g, ' ').trim();
+}
 
 export function useMeetingContext() {
   const [insights, setInsights] = useState<FrameAnalysis[]>([]);
@@ -36,7 +46,7 @@ export function useMeetingContext() {
   }, []);
 
   const addTranscriptSegment = useCallback((segment: Omit<TranscriptSegment, 'id' | 'timestamp'>) => {
-    const text = segment.text.trim();
+    const text = segment.text.replace(/\s+/g, ' ').trim();
     if (!text) return null;
 
     const full: TranscriptSegment = {
@@ -47,9 +57,21 @@ export function useMeetingContext() {
     };
 
     setTranscriptSegments((prev) => {
-      if (prev[prev.length - 1]?.text === full.text) {
+      const last = prev[prev.length - 1];
+
+      if (last?.text === full.text) {
         return prev;
       }
+
+      if (last && full.timestamp - last.timestamp <= TRANSCRIPT_MERGE_WINDOW_MS) {
+        const merged = mergeTranscriptText(last.text, full.text);
+
+        if (merged !== last.text) {
+          const next = [...prev.slice(0, -1), { ...last, text: merged, timestamp: full.timestamp }];
+          return next.slice(-MAX_TRANSCRIPT_SEGMENTS);
+        }
+      }
+
       const next = [...prev, full];
       return next.slice(-MAX_TRANSCRIPT_SEGMENTS);
     });

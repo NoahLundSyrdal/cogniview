@@ -145,6 +145,11 @@ export default function CopilotSidebar({
         {tab === 'transcript' && (
           <ScrollArea className="h-full">
             <div className="p-3 space-y-3">
+              {isCapturing && (
+                <div className="rounded-lg border border-indigo-500/20 bg-indigo-500/10 px-3 py-2 text-[11px] text-indigo-200">
+                  {isTranscribing ? 'Listening live. New transcript text should land every ~5 seconds.' : 'Listening live.'}
+                </div>
+              )}
               {transcriptSegments.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 text-center gap-3">
                   <span className="text-3xl opacity-40">🎙</span>
