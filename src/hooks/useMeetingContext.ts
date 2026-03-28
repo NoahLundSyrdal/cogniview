@@ -6,6 +6,7 @@ import type { FrameAnalysis, ChatMessage, TranscriptSegment } from '@/types';
 const MAX_CONTEXT_CHARS = 2000;
 const MAX_TRANSCRIPT_SEGMENTS = 80;
 const TRANSCRIPT_MERGE_WINDOW_MS = 12000;
+const TRAILING_PUNCTUATION_RE = /[.!?,;:]+$/;
 
 function mergeTranscriptText(existing: string, incoming: string) {
   if (!existing) return incoming;
@@ -14,6 +15,14 @@ function mergeTranscriptText(existing: string, incoming: string) {
   if (existing.endsWith(incoming)) return existing;
   if (incoming.startsWith(existing)) return incoming;
   return `${existing} ${incoming}`.replace(/\s+/g, ' ').trim();
+}
+
+function normalizeActionItem(item: string): string {
+  return item
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(TRAILING_PUNCTUATION_RE, '');
 }
 
 export function useMeetingContext() {
@@ -29,7 +38,17 @@ export function useMeetingContext() {
 
     if (analysis.actionItems?.length) {
       setAllActionItems((prev) => {
-        const newItems = analysis.actionItems.filter((item) => !prev.includes(item));
+        const existingKeys = new Set(prev.map((item) => normalizeActionItem(item)));
+        const newItems: string[] = [];
+        for (const item of analysis.actionItems) {
+          if (typeof item !== 'string') continue;
+          const clean = item.trim();
+          if (!clean) continue;
+          const key = normalizeActionItem(clean);
+          if (!key || existingKeys.has(key)) continue;
+          existingKeys.add(key);
+          newItems.push(clean);
+        }
         return [...prev, ...newItems];
       });
     }

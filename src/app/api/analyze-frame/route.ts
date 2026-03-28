@@ -40,6 +40,8 @@ Rules:
 - keyPoints should have 1-3 items max.
 - suggestedQuestions should have 0-2 items.
 - actionItems should only include real tasks/todos.
+- If the screen appears unchanged, set actionItems to [] unless a clearly new task appears now.
+- Do not restate or paraphrase tasks already implied by previous context.
 - factCheckFlags only for specific claims with numbers or controversial statements.
 - If screen appears unchanged from context, note that briefly.`;
 
