@@ -39,7 +39,7 @@ export default function FactCheckPanel({ isCapturing, isRunning, error, claims, 
       <div className="space-y-1">
         <p className="text-xs text-gray-300 font-medium">Fact-check latest frame</p>
         <p className="text-xs text-gray-500">
-          Extract claims from the most recent screenshot, then verify each claim with web sources.
+          Railtracks now turns this into a real flow: extract claims, gather sources, judge each verdict, and retry weak results before showing them here.
         </p>
       </div>
 
