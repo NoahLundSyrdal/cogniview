@@ -6,7 +6,13 @@ import InsightCard from './InsightCard';
 import MeetingControls from './MeetingControls';
 import FactCheckPanel from './FactCheckPanel';
 import AssistantCopilotChat from './AssistantCopilotChat';
-import type { FrameAnalysis, FactCheckResult, MeetingSignal, TranscriptSegment } from '@/types';
+import type {
+  FactCheckResult,
+  FactCheckStatement,
+  FrameAnalysis,
+  MeetingSignal,
+  TranscriptSegment,
+} from '@/types';
 
 function normalizeSignalKey(text: string) {
   return text
@@ -83,6 +89,7 @@ interface Props {
   isGeneratingSummary: boolean;
   onGenerateSummary: () => void;
   factCheckClaims: string[];
+  factCheckStatements: FactCheckStatement[];
   factCheckResults: FactCheckResult[];
   factCheckError: string | null;
   factCheckStatus: string | null;
@@ -112,6 +119,7 @@ export default function CopilotSidebar({
   isGeneratingSummary,
   onGenerateSummary,
   factCheckClaims,
+  factCheckStatements,
   factCheckResults,
   factCheckError,
   factCheckStatus,
@@ -209,7 +217,6 @@ export default function CopilotSidebar({
 
   return (
     <div className="w-80 flex flex-col border-l border-gray-800 bg-gray-900">
-      {/* Header */}
       <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <span className="text-sm font-semibold text-gray-100">Copilot</span>
@@ -232,7 +239,6 @@ export default function CopilotSidebar({
         />
       </div>
 
-      {/* Tabs */}
       <div className="flex border-b border-gray-800">
         {tabs.map(({ id, label, count }) => (
           <button
@@ -258,7 +264,6 @@ export default function CopilotSidebar({
         ))}
       </div>
 
-      {/* Content */}
       <div className="flex-1 min-h-0">
         {tab === 'insights' && (
           <ScrollArea className="h-full">
@@ -267,14 +272,12 @@ export default function CopilotSidebar({
                 <div className="flex flex-col items-center justify-center py-12 text-center gap-3">
                   <span className="text-3xl opacity-40">👁</span>
                   <p className="text-sm text-gray-500">
-                    {isCapturing
-                      ? 'Waiting for first frame...'
-                      : 'Start capture to see insights'}
+                    {isCapturing ? 'Waiting for first frame...' : 'Start capture to see insights'}
                   </p>
                 </div>
               ) : (
-                [...insights].reverse().map((insight, i) => (
-                  <InsightCard key={insight.timestamp} insight={insight} isLatest={i === 0} />
+                [...insights].reverse().map((insight, index) => (
+                  <InsightCard key={insight.timestamp} insight={insight} isLatest={index === 0} />
                 ))
               )}
             </div>
@@ -286,7 +289,9 @@ export default function CopilotSidebar({
             <div className="p-3 space-y-3">
               {isCapturing && (
                 <div className="rounded-lg border border-indigo-500/20 bg-indigo-500/10 px-3 py-2 text-[11px] text-indigo-200">
-                  {isTranscribing ? 'Listening live. New transcript text should land every ~5 seconds.' : 'Listening live.'}
+                  {isTranscribing
+                    ? 'Listening live. New transcript text should land every ~5 seconds.'
+                    : 'Listening live.'}
                 </div>
               )}
               {transcriptSegments.length === 0 ? (
@@ -385,6 +390,7 @@ export default function CopilotSidebar({
               error={factCheckError}
               status={factCheckStatus}
               claims={factCheckClaims}
+              statements={factCheckStatements}
               results={factCheckResults}
               onRun={onRunFactCheck}
             />

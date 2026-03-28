@@ -251,6 +251,8 @@ async def fact_check(payload: FactCheckRequest):
         response = await FACT_CHECK_FLOW.ainvoke(
             frame=payload.frame.strip(),
             meeting_context=payload.meetingContext,
+            screen_context=payload.screenContext,
+            transcript_context=payload.transcriptContext,
             max_claims=payload.maxClaims,
         )
         return response

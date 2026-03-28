@@ -1,7 +1,13 @@
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import type { Uploadable } from 'openai/uploads';
-import type { FactCheckResult, FactCheckSource, FactCheckVerdict } from '@/types';
+import type {
+  FactCheckResult,
+  FactCheckSource,
+  FactCheckStatement,
+  FactCheckStatementSource,
+  FactCheckVerdict,
+} from '@/types';
 
 export type Provider = 'anthropic' | 'openai';
 
@@ -361,7 +367,9 @@ export async function extractClaimsFromImage(params: {
 - Keep only claims that are both checkable and high-value to verify.
 - Prioritize claims that are likely wrong, surprising, high-impact, or contentious.
 - Prioritize claims with specific numbers, percentages, dates, rankings, causal assertions, or strong superlatives.
+- Be conservative: include a claim only if a wrong answer would materially change understanding, decisions, or credibility.
 - Ignore obvious/common-knowledge claims that are very likely correct without verification.
+- Ignore low-stakes approximations, minor wording imprecision, and claims where small inaccuracies are not important.
 - Ignore generic statements, definitions, product slogans, and procedural instructions.
 - If nothing meaningfully needs fact-checking, return an empty list.
 - Rank by fact-check priority and keep only the top claims.
@@ -412,8 +420,93 @@ Do not include obvious claims.`,
   }
 }
 
+export async function extractClaimsFromTranscript(params: {
+  transcriptText: string;
+  meetingContext?: string;
+  maxClaims?: number;
+}): Promise<string[]> {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    throw new Error('OPENAI_API_KEY is required for fact-checking');
+  }
+
+  const transcriptText = params.transcriptText.replace(/\s+/g, ' ').trim();
+  if (!transcriptText) return [];
+
+  const model = process.env.OPENAI_FACTCHECK_REASONING_MODEL || 'gpt-5.4';
+  const maxClaims = Math.max(1, Math.min(12, params.maxClaims ?? Number(process.env.FACTCHECK_MAX_CLAIMS || 5)));
+  const openai = new OpenAI({ apiKey });
+  const contextLine = params.meetingContext?.trim()
+    ? `Meeting context:\n${params.meetingContext.trim()}\n`
+    : 'No additional meeting context provided.\n';
+
+  const response = await openai.responses.create({
+    model,
+    input: [
+      {
+        role: 'system',
+        content: [
+          {
+            type: 'input_text',
+            text: `You extract fact-check-worthy factual statements from meeting transcript text.
+- Keep only claims that are checkable and non-trivial to verify.
+- Prioritize specific claims with numbers, percentages, dates, rankings, causal assertions, or strong superlatives.
+- Be conservative: include a claim only if being wrong would materially affect decisions, interpretation, or trust.
+- Ignore opinions, brainstorming, vague future plans, generic advice, and procedural chatter.
+- Ignore low-impact claims, harmless approximations, and statements that are likely true enough for meeting context.
+- If nothing deserves fact-checking, return an empty list.
+- Deduplicate semantically similar statements.
+- Return JSON only in this exact shape: {"claims":["..."]}.
+- Keep each claim under 180 characters.
+- Return at most ${maxClaims} claims.`,
+          },
+        ],
+      },
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'input_text',
+            text: `${contextLine}
+Transcript excerpt:
+${transcriptText}
+
+Extract only statements that should be fact-checked.`,
+          },
+        ],
+      },
+    ],
+    max_output_tokens: 700,
+  } as never);
+
+  const raw = readOutputText(response);
+  const jsonBlob = parseFirstJsonObject(raw);
+  if (!jsonBlob) return [];
+
+  try {
+    const parsed = JSON.parse(jsonBlob) as { claims?: unknown };
+    if (!Array.isArray(parsed.claims)) return [];
+    const seen = new Set<string>();
+    const claims: string[] = [];
+    for (const claim of parsed.claims) {
+      if (typeof claim !== 'string') continue;
+      const clean = claim.trim().replace(/\s+/g, ' ');
+      if (!clean) continue;
+      const key = clean.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      claims.push(clean);
+      if (claims.length >= maxClaims) break;
+    }
+    return claims;
+  } catch {
+    return [];
+  }
+}
+
 export async function verifyClaimWithWebSearch(params: {
   claim: string;
+  source: FactCheckStatementSource;
   meetingContext?: string;
 }): Promise<FactCheckResult> {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -467,6 +560,7 @@ Fact-check this claim:\n"${params.claim}"`,
   if (!jsonBlob) {
     return {
       claim: params.claim,
+      source: params.source,
       verdict: 'insufficient_evidence',
       confidence: 0.2,
       summary: 'No structured fact-check result was returned.',
@@ -487,6 +581,7 @@ Fact-check this claim:\n"${params.claim}"`,
         : 0.5;
     return {
       claim: params.claim,
+      source: params.source,
       verdict: normalizeVerdict(parsed.verdict),
       confidence: confidenceValue,
       summary:
@@ -498,6 +593,7 @@ Fact-check this claim:\n"${params.claim}"`,
   } catch {
     return {
       claim: params.claim,
+      source: params.source,
       verdict: 'insufficient_evidence',
       confidence: 0.2,
       summary: 'Could not parse fact-check output from the model.',
@@ -507,15 +603,22 @@ Fact-check this claim:\n"${params.claim}"`,
 }
 
 export async function verifyClaimsWithWebSearch(params: {
-  claims: string[];
+  statements: FactCheckStatement[];
   meetingContext?: string;
 }): Promise<FactCheckResult[]> {
-  const claims = params.claims.filter((claim) => claim.trim().length > 0);
+  const statements = params.statements
+    .map((statement) => ({
+      claim: statement.claim.trim(),
+      source: statement.source,
+    }))
+    .filter((statement) => statement.claim.length > 0);
+
   const results: FactCheckResult[] = [];
-  for (const claim of claims) {
+  for (const statement of statements) {
     // Keep sequential calls to avoid tool overuse/rate bursts.
     const result = await verifyClaimWithWebSearch({
-      claim,
+      claim: statement.claim,
+      source: statement.source,
       meetingContext: params.meetingContext,
     });
     results.push(result);

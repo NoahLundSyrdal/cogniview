@@ -10,7 +10,7 @@ import ScreenCapture from '@/components/ScreenCapture';
 import CopilotSidebar from '@/components/CopilotSidebar';
 import FinalSummaryCard from '@/components/FinalSummaryCard';
 import { cn } from '@/lib/utils';
-import type { FrameAnalysis, FactCheckResult } from '@/types';
+import type { FactCheckResult, FactCheckStatement, FrameAnalysis } from '@/types';
 
 const TRANSCRIPT_ACTION_INTERVAL_MS = 15000;
 const TRANSCRIPT_ACTION_MAX_CHARS = 2000;
@@ -168,6 +168,7 @@ export default function Home() {
   const [factCheckError, setFactCheckError] = useState<string | null>(null);
   const [factCheckStatus, setFactCheckStatus] = useState<string | null>(null);
   const [factCheckClaims, setFactCheckClaims] = useState<string[]>([]);
+  const [factCheckStatements, setFactCheckStatements] = useState<FactCheckStatement[]>([]);
   const [factCheckResults, setFactCheckResults] = useState<FactCheckResult[]>([]);
   const insightsRef = useRef<FrameAnalysis[]>([]);
   const latestAnalysisRef = useRef<FrameAnalysis | null>(null);
@@ -209,6 +210,7 @@ export default function Home() {
     addMeetingSignals,
     addTranscriptSegment,
     getTranscriptSummary,
+    getScreenSummary,
     getContextSummary,
     reset,
   } = useMeetingContext();
@@ -218,50 +220,53 @@ export default function Home() {
     insightsRef.current = insights;
   }, [insights]);
 
-  const generateFinalSummary = useCallback(async (sessionId: number) => {
-    if (!hasMeetingData) {
-      if (meetingSessionIdRef.current === sessionId) {
-        setIsGeneratingFinalSummary(false);
-      }
-      return;
-    }
-
-    try {
-      const duration = startTime ? Math.max(1, Math.round((Date.now() - startTime) / 60000)) : undefined;
-      const res = await fetch('/api/summarize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          insights,
-          actionItems: allActionItems,
-          transcriptSegments,
-          duration,
-        }),
-      });
-      const data = await res.json();
-
-      if (meetingSessionIdRef.current !== sessionId) return;
-
-      if (!res.ok) {
-        setFinalSummary(null);
-        setFinalSummaryError(data.error || `Final summary failed (HTTP ${res.status})`);
+  const generateFinalSummary = useCallback(
+    async (sessionId: number) => {
+      if (!hasMeetingData) {
+        if (meetingSessionIdRef.current === sessionId) {
+          setIsGeneratingFinalSummary(false);
+        }
         return;
       }
 
-      const nextSummary = typeof data.summary === 'string' ? data.summary.trim() : '';
-      setFinalSummary(nextSummary || null);
-      setFinalSummaryError(nextSummary ? null : 'No final summary was generated.');
-    } catch (err) {
-      console.error('Final summary failed:', err);
-      if (meetingSessionIdRef.current !== sessionId) return;
-      setFinalSummary(null);
-      setFinalSummaryError('Network error while generating the final summary.');
-    } finally {
-      if (meetingSessionIdRef.current === sessionId) {
-        setIsGeneratingFinalSummary(false);
+      try {
+        const duration = startTime ? Math.max(1, Math.round((Date.now() - startTime) / 60000)) : undefined;
+        const res = await fetch('/api/summarize', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            insights,
+            actionItems: allActionItems,
+            transcriptSegments,
+            duration,
+          }),
+        });
+        const data = await res.json();
+
+        if (meetingSessionIdRef.current !== sessionId) return;
+
+        if (!res.ok) {
+          setFinalSummary(null);
+          setFinalSummaryError(data.error || `Final summary failed (HTTP ${res.status})`);
+          return;
+        }
+
+        const nextSummary = typeof data.summary === 'string' ? data.summary.trim() : '';
+        setFinalSummary(nextSummary || null);
+        setFinalSummaryError(nextSummary ? null : 'No final summary was generated.');
+      } catch (err) {
+        console.error('Final summary failed:', err);
+        if (meetingSessionIdRef.current !== sessionId) return;
+        setFinalSummary(null);
+        setFinalSummaryError('Network error while generating the final summary.');
+      } finally {
+        if (meetingSessionIdRef.current === sessionId) {
+          setIsGeneratingFinalSummary(false);
+        }
       }
-    }
-  }, [allActionItems, hasMeetingData, insights, startTime, transcriptSegments]);
+    },
+    [allActionItems, hasMeetingData, insights, startTime, transcriptSegments]
+  );
 
   const requestFinalSummary = useCallback(() => {
     if (!hasMeetingData) return;
@@ -286,6 +291,8 @@ export default function Home() {
           body: JSON.stringify({
             frame,
             meetingContext: getContextSummary(),
+            screenContext: getScreenSummary(),
+            transcriptContext: getTranscriptSummary(),
           }),
         });
         const data = await res.json();
@@ -295,6 +302,7 @@ export default function Home() {
         }
         lastFactCheckedFrameRef.current = frame;
         setFactCheckClaims(Array.isArray(data.claims) ? data.claims : []);
+        setFactCheckStatements(Array.isArray(data.statements) ? data.statements : []);
         setFactCheckResults(Array.isArray(data.results) ? data.results : []);
       } catch (err) {
         console.error('Fact-check failed:', err);
@@ -304,7 +312,7 @@ export default function Home() {
         isFactCheckingRef.current = false;
       }
     },
-    [getContextSummary]
+    [getContextSummary, getScreenSummary, getTranscriptSummary]
   );
 
   const handleFrame = useCallback(
@@ -327,10 +335,7 @@ export default function Home() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             frame,
-            previousContext: [
-              context,
-              transcriptSummary && `Recent transcript:\n${transcriptSummary}`,
-            ]
+            previousContext: [context, transcriptSummary && `Recent transcript:\n${transcriptSummary}`]
               .filter(Boolean)
               .join('\n\n'),
           }),
@@ -498,9 +503,11 @@ export default function Home() {
     lastTranscriptActionRunAtRef.current = 0;
     lastTranscriptActionInputRef.current = '';
     latestFrameRef.current = null;
+    latestAnalysisRef.current = null;
     setFactCheckError(null);
     setFactCheckStatus(null);
     setFactCheckClaims([]);
+    setFactCheckStatements([]);
     setFactCheckResults([]);
     lastFactCheckedFrameRef.current = null;
     pendingFactCheckFrameRef.current = null;
@@ -559,6 +566,7 @@ export default function Home() {
     isGeneratingSummary: isGeneratingFinalSummary,
     onGenerateSummary: requestFinalSummary,
     factCheckClaims,
+    factCheckStatements,
     factCheckResults,
     factCheckError,
     factCheckStatus,
@@ -574,7 +582,6 @@ export default function Home() {
   return (
     <>
       <div className="flex h-screen bg-gray-950 text-white overflow-hidden">
-        {/* Main area */}
         <div
           className={cn(
             'flex-1 flex flex-col items-center p-8 relative overflow-y-auto',

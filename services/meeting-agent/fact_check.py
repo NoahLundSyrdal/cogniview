@@ -14,6 +14,7 @@ FactCheckVerdict = Literal[
     "mixed",
     "insufficient_evidence",
 ]
+FactCheckStatementSource = Literal["voice", "visual"]
 
 
 class FactCheckSource(BaseModel):
@@ -24,20 +25,30 @@ class FactCheckSource(BaseModel):
 
 class FactCheckResult(BaseModel):
     claim: str
+    source: FactCheckStatementSource = "visual"
     verdict: FactCheckVerdict
     confidence: float
     summary: str
     sources: list[FactCheckSource] = Field(default_factory=list)
 
 
+class FactCheckStatement(BaseModel):
+    claim: str
+    source: FactCheckStatementSource
+    priority: int | None = None
+
+
 class FactCheckResponse(BaseModel):
     claims: list[str] = Field(default_factory=list)
+    statements: list[FactCheckStatement] = Field(default_factory=list)
     results: list[FactCheckResult] = Field(default_factory=list)
 
 
 class FactCheckRequest(BaseModel):
     frame: str = Field(min_length=1)
     meetingContext: str | None = None
+    screenContext: str | None = None
+    transcriptContext: str | None = None
     maxClaims: int | None = Field(default=None, ge=1, le=10)
 
 
@@ -96,6 +107,66 @@ def _parse_env_int(name: str, fallback: int) -> int:
         return fallback
 
     return parsed if parsed > 0 else fallback
+
+
+def _parse_env_bool(name: str, fallback: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return fallback
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return fallback
+
+
+def _claims_to_statements(
+    claims: list[str],
+    source: FactCheckStatementSource,
+    *,
+    limit: int,
+) -> list[FactCheckStatement]:
+    normalized = _clean_items(claims, limit=limit)
+    return [
+        FactCheckStatement(claim=claim, source=source, priority=index + 1)
+        for index, claim in enumerate(normalized)
+    ]
+
+
+def _merge_statements(
+    visual_statements: list[FactCheckStatement],
+    voice_statements: list[FactCheckStatement],
+    *,
+    total_max_items: int,
+) -> list[FactCheckStatement]:
+    merged: list[FactCheckStatement] = []
+    seen: set[str] = set()
+    visual_index = 0
+    voice_index = 0
+
+    while len(merged) < total_max_items and (
+        visual_index < len(visual_statements) or voice_index < len(voice_statements)
+    ):
+        batch: list[FactCheckStatement] = []
+        if visual_index < len(visual_statements):
+            batch.append(visual_statements[visual_index])
+            visual_index += 1
+        if voice_index < len(voice_statements):
+            batch.append(voice_statements[voice_index])
+            voice_index += 1
+
+        for statement in batch:
+            key = f"{statement.source}:{statement.claim.lower()}"
+            if key in seen:
+                continue
+            seen.add(key)
+            statement.priority = len(merged) + 1
+            merged.append(statement)
+            if len(merged) >= total_max_items:
+                break
+
+    return merged
 
 
 def _parse_data_url_frame(frame: str) -> tuple[str, str]:
@@ -203,12 +274,14 @@ def _clamp_confidence(value: Any, fallback: float = 0.5) -> float:
 def _fallback_result(
     claim: str,
     *,
+    source: FactCheckStatementSource = "visual",
     summary: str,
     confidence: float = 0.2,
     sources: list[FactCheckSource] | None = None,
 ) -> FactCheckResult:
     return FactCheckResult(
         claim=claim,
+        source=source,
         verdict="insufficient_evidence",
         confidence=max(0.0, min(1.0, confidence)),
         summary=summary,
@@ -235,6 +308,7 @@ def _format_evidence_for_prompt(evidence: ClaimEvidence) -> str:
 
 def _normalize_candidate_result(
     claim: str,
+    source: FactCheckStatementSource,
     payload: dict[str, Any],
     *,
     evidence: ClaimEvidence,
@@ -262,6 +336,7 @@ def _normalize_candidate_result(
 
     return FactCheckResult(
         claim=claim,
+        source=source,
         verdict=verdict,
         confidence=confidence,
         summary=summary[:320],
@@ -340,7 +415,7 @@ async def _create_openai_response_with_web_search(
 @rt.function_node
 async def extract_claims_from_frame(
     frame: str,
-    meeting_context: str | None = None,
+    screen_context: str | None = None,
     max_claims: int = 5,
 ) -> list[str]:
     client = _create_openai_client()
@@ -348,9 +423,9 @@ async def extract_claims_from_frame(
     data_url = f"data:{mime_type};base64,{base64}"
     model = os.getenv("OPENAI_FACTCHECK_IMAGE_MODEL") or "gpt-5.4"
     context_line = (
-        f"Meeting context:\n{meeting_context.strip()}\n"
-        if isinstance(meeting_context, str) and meeting_context.strip()
-        else "Meeting context is unavailable.\n"
+        f"Screen context:\n{screen_context.strip()}\n"
+        if isinstance(screen_context, str) and screen_context.strip()
+        else "Screen context is unavailable.\n"
     )
 
     response = await client.responses.create(
@@ -365,7 +440,9 @@ async def extract_claims_from_frame(
                             "You extract factual claims from meeting screenshots.\n"
                             "- Keep only checkable, high-value claims.\n"
                             "- Prioritize numbers, percentages, dates, rankings, causal claims, and strong superlatives.\n"
+                            "- Be conservative: include a claim only if being wrong would materially change understanding, decisions, or credibility.\n"
                             "- Ignore opinions, slogans, coding suggestions, speculative questions, and obvious common knowledge.\n"
+                            "- Ignore low-stakes approximations, minor imprecision, and claims where small inaccuracies are not important.\n"
                             "- Deduplicate semantically similar claims.\n"
                             "- Return JSON only in this shape: {\"claims\":[\"...\"]}.\n"
                             f"- Return at most {max_claims} claims.\n"
@@ -385,6 +462,77 @@ async def extract_claims_from_frame(
                         ),
                     },
                     {"type": "input_image", "image_url": data_url},
+                ],
+            },
+        ],
+        max_output_tokens=700,
+    )
+
+    raw = _read_response_output_text(response)
+    json_blob = _parse_first_json_object(raw)
+    if not json_blob:
+        return []
+
+    try:
+        payload = json.loads(json_blob)
+    except json.JSONDecodeError:
+        return []
+
+    return _clean_items(payload.get("claims"), limit=max_claims)
+
+
+@rt.function_node
+async def extract_claims_from_transcript(
+    transcript_context: str | None = None,
+    meeting_context: str | None = None,
+    max_claims: int = 5,
+) -> list[str]:
+    transcript = _clean_text(transcript_context)
+    if not transcript:
+        return []
+
+    client = _create_openai_client()
+    model = os.getenv("OPENAI_FACTCHECK_REASONING_MODEL") or "gpt-5.4"
+    context_line = (
+        f"Meeting context:\n{meeting_context.strip()}\n"
+        if isinstance(meeting_context, str) and meeting_context.strip()
+        else "No additional meeting context provided.\n"
+    )
+
+    response = await client.responses.create(
+        model=model,
+        input=[
+            {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            "You extract fact-check-worthy factual statements from spoken meeting transcript text.\n"
+                            "- Keep only checkable, high-value claims.\n"
+                            "- Prioritize specific numbers, percentages, dates, rankings, causal assertions, and strong superlatives.\n"
+                            "- Be conservative: include a claim only if being wrong would materially affect decisions, interpretation, or trust.\n"
+                            "- Ignore opinions, brainstorming, vague commitments, and generic process talk.\n"
+                            "- Ignore low-impact claims, harmless approximations, and statements that are likely true enough for meeting context.\n"
+                            "- Deduplicate semantically similar claims.\n"
+                            "- Return JSON only in this shape: {\"claims\":[\"...\"]}.\n"
+                            f"- Return at most {max_claims} claims.\n"
+                            "- Keep each claim under 180 characters."
+                        ),
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            f"{context_line}\n"
+                            f"Transcript excerpt:\n{transcript}\n\n"
+                            "Extract only the statements that should be fact-checked."
+                        ),
+                    }
                 ],
             },
         ],
@@ -491,6 +639,7 @@ async def gather_claim_evidence(
 @rt.function_node
 async def synthesize_fact_check_result(
     claim: str,
+    source: FactCheckStatementSource,
     evidence: ClaimEvidence,
     meeting_context: str | None = None,
     review_feedback: str | None = None,
@@ -541,6 +690,7 @@ async def synthesize_fact_check_result(
     if not json_blob:
         return _fallback_result(
             claim,
+            source=source,
             summary=evidence.summary or "The available evidence was inconclusive.",
             sources=evidence.sources[:3],
         )
@@ -550,11 +700,12 @@ async def synthesize_fact_check_result(
     except json.JSONDecodeError:
         return _fallback_result(
             claim,
+            source=source,
             summary=evidence.summary or "Could not parse the fact-check verdict.",
             sources=evidence.sources[:3],
         )
 
-    return _normalize_candidate_result(claim, payload, evidence=evidence)
+    return _normalize_candidate_result(claim, source, payload, evidence=evidence)
 
 
 @rt.function_node
@@ -619,6 +770,7 @@ async def review_fact_check_result(
 @rt.function_node
 async def fact_check_single_claim(
     claim: str,
+    source: FactCheckStatementSource = "visual",
     meeting_context: str | None = None,
     max_attempts: int = 2,
 ) -> FactCheckResult:
@@ -631,6 +783,7 @@ async def fact_check_single_claim(
     ):
         return _fallback_result(
             claim,
+            source=source,
             summary="No meaningful evidence was gathered for this claim.",
         )
 
@@ -642,6 +795,7 @@ async def fact_check_single_claim(
         candidate = await rt.call(
             synthesize_fact_check_result,
             claim,
+            source,
             evidence,
             meeting_context,
             review_feedback,
@@ -677,6 +831,7 @@ async def fact_check_single_claim(
 
     return _fallback_result(
         claim,
+        source=source,
         summary=fallback_summary,
         confidence=0.3,
         sources=fallback_sources,
@@ -687,41 +842,89 @@ async def fact_check_single_claim(
 async def fact_check_latest_frame(
     frame: str,
     meeting_context: str | None = None,
+    screen_context: str | None = None,
+    transcript_context: str | None = None,
     max_claims: int | None = None,
 ) -> FactCheckResponse:
     resolved_max_claims = max_claims or _parse_env_int("FACTCHECK_MAX_CLAIMS", 5)
-    max_attempts = _parse_env_int("FACTCHECK_VALIDATION_ATTEMPTS", 2)
-
-    claims = await rt.call(
-        extract_claims_from_frame,
-        frame,
-        meeting_context,
+    max_visual_statements = _parse_env_int(
+        "FACTCHECK_MAX_VISUAL_STATEMENTS",
         resolved_max_claims,
     )
-    if not claims:
+    max_voice_statements = _parse_env_int(
+        "FACTCHECK_MAX_VOICE_STATEMENTS",
+        resolved_max_claims,
+    )
+    enable_transcript_extraction = _parse_env_bool(
+        "ENABLE_TRANSCRIPT_FACTCHECK_EXTRACTION",
+        True,
+    )
+    max_attempts = _parse_env_int("FACTCHECK_VALIDATION_ATTEMPTS", 2)
+
+    visual_claims = await rt.call(
+        extract_claims_from_frame,
+        frame,
+        screen_context,
+        min(resolved_max_claims, max_visual_statements),
+    )
+    voice_claims = (
+        await rt.call(
+            extract_claims_from_transcript,
+            transcript_context,
+            meeting_context,
+            min(resolved_max_claims, max_voice_statements),
+        )
+        if enable_transcript_extraction
+        else []
+    )
+
+    visual_statements = _claims_to_statements(
+        visual_claims,
+        "visual",
+        limit=max_visual_statements,
+    )
+    voice_statements = _claims_to_statements(
+        voice_claims,
+        "voice",
+        limit=max_voice_statements,
+    )
+    statements = _merge_statements(
+        visual_statements,
+        voice_statements,
+        total_max_items=resolved_max_claims,
+    )
+    if not statements:
         return FactCheckResponse()
 
+    claims = [statement.claim for statement in statements]
+    sources = [statement.source for statement in statements]
     results = await rt.call_batch(
         fact_check_single_claim,
         claims,
+        sources,
         [meeting_context] * len(claims),
         [max_attempts] * len(claims),
         return_exceptions=True,
     )
 
     normalized_results: list[FactCheckResult] = []
-    for claim, result in zip(claims, results):
+    for statement, result in zip(statements, results):
         if isinstance(result, Exception):
             normalized_results.append(
                 _fallback_result(
-                    claim,
+                    statement.claim,
+                    source=statement.source,
                     summary=f"Fact-checking failed for this claim: {result}",
                 )
             )
             continue
         normalized_results.append(result)
 
-    return FactCheckResponse(claims=claims, results=normalized_results)
+    return FactCheckResponse(
+        claims=claims,
+        statements=statements,
+        results=normalized_results,
+    )
 
 
 FACT_CHECK_FLOW = rt.Flow(

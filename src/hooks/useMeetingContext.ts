@@ -104,7 +104,9 @@ function isNearDuplicateSignal(left: string, right: string) {
   if (normalizedLeft === normalizedRight) return true;
   if (
     (normalizedLeft.includes(normalizedRight) || normalizedRight.includes(normalizedLeft)) &&
-    Math.min(normalizedLeft.length, normalizedRight.length) / Math.max(normalizedLeft.length, normalizedRight.length) >= 0.68
+    Math.min(normalizedLeft.length, normalizedRight.length) /
+      Math.max(normalizedLeft.length, normalizedRight.length) >=
+      0.68
   ) {
     return true;
   }
@@ -154,38 +156,37 @@ export function useMeetingContext() {
     []
   );
 
-  const mergeActionItems = useCallback((items: string[], source: MeetingSignalSource) => {
-    if (!items.length) return;
+  const mergeActionItems = useCallback(
+    (items: string[], source: MeetingSignalSource) => {
+      if (!items.length) return;
 
-    const inserted: Array<{ text: string; key: string }> = [];
+      const inserted: string[] = [];
 
-    setAllActionItems((prev) => {
-      const newItems: string[] = [];
-      for (const item of items) {
-        if (typeof item !== 'string') continue;
-        const clean = item.trim();
-        if (!clean) continue;
-        if (!normalizeSignalText(clean)) continue;
-        if (
-          prev.some((existing) => isNearDuplicateSignal(existing, clean)) ||
-          newItems.some((existing) => isNearDuplicateSignal(existing, clean))
-        ) {
-          continue;
+      setAllActionItems((prev) => {
+        const newItems: string[] = [];
+        for (const item of items) {
+          if (typeof item !== 'string') continue;
+          const clean = item.trim();
+          if (!clean) continue;
+          if (!normalizeSignalText(clean)) continue;
+          if (
+            prev.some((existing) => isNearDuplicateSignal(existing, clean)) ||
+            newItems.some((existing) => isNearDuplicateSignal(existing, clean))
+          ) {
+            continue;
+          }
+          newItems.push(clean);
+          inserted.push(clean);
         }
-        newItems.push(clean);
-        inserted.push({ text: clean, key: normalizeSignalText(clean) });
-      }
-      if (!newItems.length) return prev;
-      return [...prev, ...newItems];
-    });
+        if (!newItems.length) return prev;
+        return [...prev, ...newItems];
+      });
 
-    if (!inserted.length) return;
-    mergeSignalEntries(
-      inserted.map((entry) => entry.text),
-      source,
-      setActionSignals
-    );
-  }, [mergeSignalEntries]);
+      if (!inserted.length) return;
+      mergeSignalEntries(inserted, source, setActionSignals);
+    },
+    [mergeSignalEntries]
+  );
 
   const addMeetingSignals = useCallback(
     (signals: MeetingSignalsPayload, source: MeetingSignalSource = 'speech') => {
@@ -196,18 +197,24 @@ export function useMeetingContext() {
     [mergeActionItems, mergeSignalEntries]
   );
 
-  const addInsight = useCallback((analysis: FrameAnalysis) => {
-    setInsights((prev) => [...prev, analysis]);
-    setContext(analysis.contextForNext || '');
+  const addInsight = useCallback(
+    (analysis: FrameAnalysis) => {
+      setInsights((prev) => [...prev, analysis]);
+      setContext(analysis.contextForNext || '');
 
-    if (analysis.actionItems?.length) {
-      mergeActionItems(analysis.actionItems, 'vision');
-    }
-  }, [mergeActionItems]);
+      if (analysis.actionItems?.length) {
+        mergeActionItems(analysis.actionItems, 'vision');
+      }
+    },
+    [mergeActionItems]
+  );
 
-  const addActionItems = useCallback((items: string[]) => {
-    addMeetingSignals({ actionItems: items }, 'speech');
-  }, [addMeetingSignals]);
+  const addActionItems = useCallback(
+    (items: string[]) => {
+      addMeetingSignals({ actionItems: items }, 'speech');
+    },
+    [addMeetingSignals]
+  );
 
   const addMessage = useCallback((msg: Omit<ChatMessage, 'id' | 'timestamp'>) => {
     const full: ChatMessage = {
@@ -261,18 +268,23 @@ export function useMeetingContext() {
     return summary.slice(-MAX_CONTEXT_CHARS);
   }, [transcriptSegments]);
 
-  const getContextSummary = useCallback(() => {
+  const getScreenSummary = useCallback(() => {
     const recentInsights = insights.slice(-5);
     const visualSummary = recentInsights
-      .map((i) => `[${new Date(i.timestamp).toLocaleTimeString()}] ${i.summary}`)
+      .map((insight) => `[${new Date(insight.timestamp).toLocaleTimeString()}] ${insight.summary}`)
       .join('\n');
+    return visualSummary.slice(-MAX_CONTEXT_CHARS);
+  }, [insights]);
+
+  const getContextSummary = useCallback(() => {
+    const visualSummary = getScreenSummary();
     const transcriptSummary = getTranscriptSummary();
 
     return [visualSummary && `Screen:\n${visualSummary}`, transcriptSummary && `Speech:\n${transcriptSummary}`]
       .filter(Boolean)
       .join('\n\n')
       .slice(-MAX_CONTEXT_CHARS);
-  }, [getTranscriptSummary, insights]);
+  }, [getScreenSummary, getTranscriptSummary]);
 
   const reset = useCallback(() => {
     setInsights([]);
@@ -300,6 +312,7 @@ export function useMeetingContext() {
     addMessage,
     addTranscriptSegment,
     getTranscriptSummary,
+    getScreenSummary,
     getContextSummary,
     reset,
   };
