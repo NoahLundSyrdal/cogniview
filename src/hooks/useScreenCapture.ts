@@ -9,6 +9,22 @@ export function useScreenCapture(onFrame: (frame: string) => void) {
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
+  const stopCapture = useCallback(() => {
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+      videoRef.current = null;
+    }
+    setIsCapturing(false);
+  }, []);
+
   const startCapture = useCallback(async () => {
     setCaptureError(null);
     try {
@@ -40,6 +56,7 @@ export function useScreenCapture(onFrame: (frame: string) => void) {
 
       setIsCapturing(true);
       stream.getVideoTracks()[0].onended = () => stopCapture();
+      return true;
     } catch (err) {
       const error = err as DOMException;
       if (error.name === 'NotAllowedError') {
@@ -49,25 +66,9 @@ export function useScreenCapture(onFrame: (frame: string) => void) {
       } else {
         setCaptureError(error.message || 'Screen capture failed.');
       }
+      return false;
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onFrame]);
-
-  const stopCapture = useCallback(() => {
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
-    }
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((t) => t.stop());
-      streamRef.current = null;
-    }
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-      videoRef.current = null;
-    }
-    setIsCapturing(false);
-  }, []);
+  }, [onFrame, stopCapture]);
 
   return { isCapturing, captureError, startCapture, stopCapture };
 }

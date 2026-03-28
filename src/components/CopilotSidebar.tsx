@@ -15,7 +15,6 @@ interface Props {
   isCapturing: boolean;
   isAnalyzing: boolean;
   allActionItems: string[];
-  context: string;
   onSendMessage: (msg: string) => Promise<void>;
   startTime: number | null;
 }
@@ -28,7 +27,6 @@ export default function CopilotSidebar({
   isCapturing,
   isAnalyzing,
   allActionItems,
-  context,
   onSendMessage,
   startTime,
 }: Props) {
@@ -144,7 +142,6 @@ export default function CopilotSidebar({
             <div className="p-3 space-y-3">
               <ActionItems items={allActionItems} />
               <MeetingControls
-                isCapturing={isCapturing}
                 insights={insights}
                 actionItems={allActionItems}
                 startTime={startTime}

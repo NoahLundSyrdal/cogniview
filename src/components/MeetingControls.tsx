@@ -5,13 +5,12 @@ import { Button } from '@/components/ui/button';
 import type { FrameAnalysis } from '@/types';
 
 interface Props {
-  isCapturing: boolean;
   insights: FrameAnalysis[];
   actionItems: string[];
   startTime: number | null;
 }
 
-export default function MeetingControls({ isCapturing, insights, actionItems, startTime }: Props) {
+export default function MeetingControls({ insights, actionItems, startTime }: Props) {
   const [isExporting, setIsExporting] = useState(false);
   const [summary, setSummary] = useState<string | null>(null);
 
