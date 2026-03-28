@@ -1,7 +1,10 @@
 'use client';
 
 import { useState, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
+import { Button } from '@/components/ui/button';
 import { useScreenCapture } from '@/hooks/useScreenCapture';
+import { useDetachedWindow } from '@/hooks/useDetachedWindow';
 import { useMeetingContext } from '@/hooks/useMeetingContext';
 import ScreenCapture from '@/components/ScreenCapture';
 import CopilotSidebar from '@/components/CopilotSidebar';
@@ -12,6 +15,22 @@ export default function Home() {
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [startTime, setStartTime] = useState<number | null>(null);
   const latestAnalysisRef = useRef<FrameAnalysis | null>(null);
+  const {
+    isOpen: isSidebarDetached,
+    mode: detachedSidebarMode,
+    portalContainer: detachedSidebarContainer,
+    openWindow: openSidebarWindow,
+    focusWindow: focusSidebarWindow,
+    closeWindow: closeSidebarWindow,
+  } = useDetachedWindow({
+    title: 'CogniView Copilot',
+    name: 'cogniview-copilot',
+    features: 'popup=yes,width=420,height=880,resizable=yes,scrollbars=no',
+    pictureInPicture: {
+      width: 420,
+      height: 880,
+    },
+  });
 
   const {
     insights,
@@ -54,11 +73,25 @@ export default function Home() {
   const { isCapturing, captureError, startCapture, stopCapture } = useScreenCapture(handleFrame);
 
   const handleStart = useCallback(async () => {
+    const sidebarWindowPromise = openSidebarWindow().catch((error) => {
+      console.error('Opening floating sidebar failed:', error);
+      return false;
+    });
+
     reset();
-    setStartTime(Date.now());
+    setStartTime(null);
     setAnalysisError(null);
-    await startCapture();
-  }, [reset, startCapture]);
+    const didStart = await startCapture();
+
+    if (!didStart) {
+      if (await sidebarWindowPromise) {
+        closeSidebarWindow();
+      }
+      return;
+    }
+
+    setStartTime(Date.now());
+  }, [closeSidebarWindow, openSidebarWindow, reset, startCapture]);
 
   const handleStop = useCallback(() => {
     stopCapture();
@@ -91,64 +124,122 @@ export default function Home() {
     [addMessage, getContextSummary]
   );
 
+  const sidebarProps = {
+    insights,
+    messages,
+    isCapturing,
+    isAnalyzing,
+    allActionItems,
+    onSendMessage: handleSendMessage,
+    startTime,
+  };
+
   return (
-    <div className="flex h-screen bg-gray-950 text-white overflow-hidden">
-      {/* Main area */}
-      <div className="flex-1 flex flex-col items-center justify-center p-8 relative">
-        <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,rgba(99,102,241,0.08)_0%,transparent_70%)] pointer-events-none" />
+    <>
+      <div className="flex h-screen bg-gray-950 text-white overflow-hidden">
+        {/* Main area */}
+        <div className="flex-1 flex flex-col items-center justify-center p-8 relative">
+          <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,rgba(99,102,241,0.08)_0%,transparent_70%)] pointer-events-none" />
 
-        <div className="relative z-10 flex flex-col items-center gap-2 mb-10">
-          <div className="flex items-center gap-2.5">
-            <span className="text-2xl">👁</span>
-            <h1 className="text-3xl font-bold tracking-tight">CogniView</h1>
+          <div className="relative z-10 flex flex-col items-center gap-2 mb-10">
+            <div className="flex items-center gap-2.5">
+              <span className="text-2xl">👁</span>
+              <h1 className="text-3xl font-bold tracking-tight">CogniView</h1>
+            </div>
+            <p className="text-gray-400 text-sm">AI that actually watches your screen</p>
           </div>
-          <p className="text-gray-400 text-sm">AI that actually watches your screen</p>
+
+          <div className="relative z-10">
+            <ScreenCapture
+              isCapturing={isCapturing}
+              isAnalyzing={isAnalyzing}
+              captureError={captureError}
+              analysisError={analysisError}
+              onStart={handleStart}
+              onStop={handleStop}
+            />
+          </div>
+
+          {isCapturing && (
+            <div className="relative z-10 mt-10 flex gap-6 text-center">
+              {[
+                { label: 'Frames analyzed', value: insights.length },
+                { label: 'Action items', value: allActionItems.length },
+                { label: 'Messages', value: messages.length },
+              ].map(({ label, value }) => (
+                <div key={label} className="flex flex-col gap-0.5">
+                  <span className="text-2xl font-bold text-indigo-300">{value}</span>
+                  <span className="text-xs text-gray-500">{label}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="absolute bottom-6 flex items-center gap-3 text-xs text-gray-600">
+            <span>Powered by</span>
+            <span className="text-gray-500">Gemini Vision</span>
+            <span>+</span>
+            <span className="text-gray-500">Claude AI</span>
+          </div>
         </div>
 
-        <div className="relative z-10">
-          <ScreenCapture
-            isCapturing={isCapturing}
-            isAnalyzing={isAnalyzing}
-            captureError={captureError}
-            analysisError={analysisError}
-            onStart={handleStart}
-            onStop={handleStop}
-          />
-        </div>
-
-        {isCapturing && (
-          <div className="relative z-10 mt-10 flex gap-6 text-center">
-            {[
-              { label: 'Frames analyzed', value: insights.length },
-              { label: 'Action items', value: allActionItems.length },
-              { label: 'Messages', value: messages.length },
-            ].map(({ label, value }) => (
-              <div key={label} className="flex flex-col gap-0.5">
-                <span className="text-2xl font-bold text-indigo-300">{value}</span>
-                <span className="text-xs text-gray-500">{label}</span>
+        {isSidebarDetached ? (
+          <div className="w-80 border-l border-gray-800 bg-gray-900 flex flex-col justify-between">
+            <div className="p-5 space-y-4">
+              <div className="space-y-2">
+                <p className="text-sm font-semibold text-gray-100">
+                  {detachedSidebarMode === 'pip'
+                    ? 'Copilot is floating over your work'
+                    : 'Copilot is popped out'}
+                </p>
+                <p className="text-sm text-gray-400 leading-relaxed">
+                  {detachedSidebarMode === 'pip'
+                    ? 'Keep this tab open while you present. The live sidebar is running in a small always-on-top companion window so it stays visible after you switch to the window you chose to share.'
+                    : 'Keep this tab open while you present. Your live sidebar is updating in its own window so it stays visible when this page is in the background.'}
+                </p>
               </div>
-            ))}
-          </div>
-        )}
 
-        <div className="absolute bottom-6 flex items-center gap-3 text-xs text-gray-600">
-          <span>Powered by</span>
-          <span className="text-gray-500">Gemini Vision</span>
-          <span>+</span>
-          <span className="text-gray-500">Claude AI</span>
-        </div>
+              <div className="grid gap-2">
+                {detachedSidebarMode === 'popup' && (
+                  <Button
+                    onClick={focusSidebarWindow}
+                    className="bg-indigo-600 hover:bg-indigo-500 text-white"
+                  >
+                    Focus Copilot Window
+                  </Button>
+                )}
+                <Button
+                  onClick={closeSidebarWindow}
+                  variant={detachedSidebarMode === 'popup' ? 'outline' : 'default'}
+                  className={
+                    detachedSidebarMode === 'popup'
+                      ? 'border-gray-700 bg-gray-950 text-gray-200 hover:bg-gray-800'
+                      : 'bg-indigo-600 hover:bg-indigo-500 text-white'
+                  }
+                >
+                  Dock Sidebar Back Here
+                </Button>
+              </div>
+            </div>
+
+            <div className="px-5 pb-5 text-xs text-gray-500 leading-relaxed">
+              {detachedSidebarMode === 'pip'
+                ? 'If you close the floating companion window, the sidebar will return here automatically.'
+                : 'If you close the pop-out window, the sidebar will return here automatically.'}
+            </div>
+          </div>
+        ) : (
+          <CopilotSidebar {...sidebarProps} />
+        )}
       </div>
 
-      <CopilotSidebar
-        insights={insights}
-        messages={messages}
-        isCapturing={isCapturing}
-        isAnalyzing={isAnalyzing}
-        allActionItems={allActionItems}
-        context={context}
-        onSendMessage={handleSendMessage}
-        startTime={startTime}
-      />
-    </div>
+      {detachedSidebarContainer &&
+        createPortal(
+          <div className="h-screen bg-gray-950 text-white">
+            <CopilotSidebar {...sidebarProps} />
+          </div>,
+          detachedSidebarContainer
+        )}
+    </>
   );
 }
