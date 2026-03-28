@@ -8,6 +8,8 @@ import { useDetachedWindow } from '@/hooks/useDetachedWindow';
 import { useMeetingContext } from '@/hooks/useMeetingContext';
 import ScreenCapture from '@/components/ScreenCapture';
 import CopilotSidebar from '@/components/CopilotSidebar';
+import FinalSummaryCard from '@/components/FinalSummaryCard';
+import { cn } from '@/lib/utils';
 import type { FrameAnalysis, FactCheckResult } from '@/types';
 
 const TRANSCRIPT_ACTION_INTERVAL_MS = 15000;
@@ -158,9 +160,14 @@ export default function Home() {
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [transcriptError, setTranscriptError] = useState<string | null>(null);
   const [activeTranscriptJobs, setActiveTranscriptJobs] = useState(0);
+  const [activeTranscriptActionJobs, setActiveTranscriptActionJobs] = useState(0);
   const [assistantChatMessageCount, setAssistantChatMessageCount] = useState(0);
   const [chatSessionId, setChatSessionId] = useState(() => crypto.randomUUID());
   const [startTime, setStartTime] = useState<number | null>(null);
+  const [finalSummary, setFinalSummary] = useState<string | null>(null);
+  const [finalSummaryError, setFinalSummaryError] = useState<string | null>(null);
+  const [isGeneratingFinalSummary, setIsGeneratingFinalSummary] = useState(false);
+  const [shouldGenerateFinalSummary, setShouldGenerateFinalSummary] = useState(false);
   const [isFactChecking, setIsFactChecking] = useState(false);
   const [factCheckError, setFactCheckError] = useState<string | null>(null);
   const [factCheckStatus, setFactCheckStatus] = useState<string | null>(null);
@@ -176,6 +183,7 @@ export default function Home() {
   const lastFactCheckedFrameRef = useRef<string | null>(null);
   const pendingFactCheckFrameRef = useRef<string | null>(null);
   const isFactCheckingRef = useRef(false);
+  const meetingSessionIdRef = useRef(0);
   const {
     isOpen: isSidebarDetached,
     mode: detachedSidebarMode,
@@ -215,10 +223,64 @@ export default function Home() {
     process.env.NEXT_PUBLIC_COMMITMENTS_MAX_ITEMS,
     DEFAULT_COMMITMENTS_MAX_ITEMS
   );
+  const hasMeetingData = insights.length > 0 || transcriptSegments.length > 0;
 
   useEffect(() => {
     insightsRef.current = insights;
   }, [insights]);
+
+  const generateFinalSummary = useCallback(async (sessionId: number) => {
+    if (!hasMeetingData) {
+      if (meetingSessionIdRef.current === sessionId) {
+        setIsGeneratingFinalSummary(false);
+      }
+      return;
+    }
+
+    try {
+      const duration = startTime ? Math.max(1, Math.round((Date.now() - startTime) / 60000)) : undefined;
+      const res = await fetch('/api/summarize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          insights,
+          actionItems: allActionItems,
+          transcriptSegments,
+          duration,
+        }),
+      });
+      const data = await res.json();
+
+      if (meetingSessionIdRef.current !== sessionId) return;
+
+      if (!res.ok) {
+        setFinalSummary(null);
+        setFinalSummaryError(data.error || `Final summary failed (HTTP ${res.status})`);
+        return;
+      }
+
+      const nextSummary = typeof data.summary === 'string' ? data.summary.trim() : '';
+      setFinalSummary(nextSummary || null);
+      setFinalSummaryError(nextSummary ? null : 'No final summary was generated.');
+    } catch (err) {
+      console.error('Final summary failed:', err);
+      if (meetingSessionIdRef.current !== sessionId) return;
+      setFinalSummary(null);
+      setFinalSummaryError('Network error while generating the final summary.');
+    } finally {
+      if (meetingSessionIdRef.current === sessionId) {
+        setIsGeneratingFinalSummary(false);
+      }
+    }
+  }, [allActionItems, hasMeetingData, insights, startTime, transcriptSegments]);
+
+  const requestFinalSummary = useCallback(() => {
+    if (!hasMeetingData) return;
+    setFinalSummary(null);
+    setFinalSummaryError(null);
+    setIsGeneratingFinalSummary(true);
+    setShouldGenerateFinalSummary(true);
+  }, [hasMeetingData]);
 
   const runFactCheckForFrame = useCallback(
     async (frame: string) => {
@@ -367,6 +429,7 @@ export default function Home() {
     transcriptActionQueueRef.current = transcriptActionQueueRef.current
       .catch(() => undefined)
       .then(async () => {
+        setActiveTranscriptActionJobs((count) => count + 1);
         try {
           const res = await fetch('/api/extract-actions', {
             method: 'POST',
@@ -380,6 +443,8 @@ export default function Home() {
           }
         } catch (err) {
           console.error('Transcript commitment extraction failed:', err);
+        } finally {
+          setActiveTranscriptActionJobs((count) => Math.max(0, count - 1));
         }
       });
 
@@ -390,6 +455,28 @@ export default function Home() {
     onFrame: handleFrame,
     onAudioChunk: handleAudioChunk,
   });
+  const showMainScreenSummary =
+    !isCapturing &&
+    hasMeetingData &&
+    (isGeneratingFinalSummary || Boolean(finalSummary) || Boolean(finalSummaryError));
+
+  useEffect(() => {
+    if (!shouldGenerateFinalSummary) return;
+    if (isCapturing || isAnalyzing || activeTranscriptJobs > 0 || activeTranscriptActionJobs > 0) {
+      return;
+    }
+
+    const sessionId = meetingSessionIdRef.current;
+    setShouldGenerateFinalSummary(false);
+    void generateFinalSummary(sessionId);
+  }, [
+    activeTranscriptActionJobs,
+    activeTranscriptJobs,
+    generateFinalSummary,
+    isAnalyzing,
+    isCapturing,
+    shouldGenerateFinalSummary,
+  ]);
 
   useEffect(() => {
     if (!isCapturing || transcriptSegments.length === 0) return;
@@ -397,6 +484,7 @@ export default function Home() {
   }, [extractCommitmentsFromTranscript, isCapturing, transcriptSegments]);
 
   const handleStart = useCallback(async () => {
+    meetingSessionIdRef.current += 1;
     const sidebarWindowPromise = openSidebarWindow().catch((error) => {
       console.error('Opening floating sidebar failed:', error);
       return false;
@@ -407,8 +495,13 @@ export default function Home() {
     setAnalysisError(null);
     setTranscriptError(null);
     setActiveTranscriptJobs(0);
+    setActiveTranscriptActionJobs(0);
     setAssistantChatMessageCount(0);
     setChatSessionId(crypto.randomUUID());
+    setFinalSummary(null);
+    setFinalSummaryError(null);
+    setIsGeneratingFinalSummary(false);
+    setShouldGenerateFinalSummary(false);
     transcriptQueueRef.current = Promise.resolve();
     transcriptActionQueueRef.current = Promise.resolve();
     lastTranscriptActionRunAtRef.current = 0;
@@ -437,7 +530,8 @@ export default function Home() {
     pendingFactCheckFrameRef.current = null;
     setFactCheckStatus(null);
     stopCapture();
-  }, [stopCapture]);
+    requestFinalSummary();
+  }, [requestFinalSummary, stopCapture]);
 
   const handleRunFactCheck = useCallback(async () => {
     const latestFrame = latestFrameRef.current;
@@ -469,7 +563,10 @@ export default function Home() {
     liveNowSummary: getLiveNowSummary(),
     recentCommitments: getRecentCommitments(commitmentsWindowMs, commitmentsMaxItems),
     transcriptSegments,
-    startTime,
+    finalSummary,
+    finalSummaryError,
+    isGeneratingSummary: isGeneratingFinalSummary,
+    onGenerateSummary: requestFinalSummary,
     factCheckClaims,
     factCheckResults,
     factCheckError,
@@ -487,7 +584,12 @@ export default function Home() {
     <>
       <div className="flex h-screen bg-gray-950 text-white overflow-hidden">
         {/* Main area */}
-        <div className="flex-1 flex flex-col items-center justify-center p-8 relative">
+        <div
+          className={cn(
+            'flex-1 flex flex-col items-center p-8 relative overflow-y-auto',
+            showMainScreenSummary ? 'justify-start' : 'justify-center'
+          )}
+        >
           <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,rgba(99,102,241,0.08)_0%,transparent_70%)] pointer-events-none" />
 
           <div className="relative z-10 flex flex-col items-center gap-2 mb-10">
@@ -503,6 +605,8 @@ export default function Home() {
               isCapturing={isCapturing}
               isAnalyzing={isAnalyzing}
               isTranscribing={activeTranscriptJobs > 0}
+              hasCompletedMeeting={!isCapturing && hasMeetingData}
+              isGeneratingSummary={isGeneratingFinalSummary}
               captureError={captureError}
               analysisError={analysisError}
               transcriptError={transcriptError}
@@ -510,6 +614,20 @@ export default function Home() {
               onStop={handleStop}
             />
           </div>
+
+          {showMainScreenSummary && (
+            <div className="relative z-10 mt-8 w-full max-w-4xl">
+              <FinalSummaryCard
+                variant="main"
+                summary={finalSummary}
+                summaryError={finalSummaryError}
+                isGeneratingSummary={isGeneratingFinalSummary}
+                isCapturing={isCapturing}
+                hasMeetingData={hasMeetingData}
+                onGenerateSummary={requestFinalSummary}
+              />
+            </div>
+          )}
 
           {isCapturing && (
             <div className="relative z-10 mt-10 flex gap-6 text-center">

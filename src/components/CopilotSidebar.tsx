@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import InsightCard from './InsightCard';
 import MeetingControls from './MeetingControls';
@@ -18,7 +18,10 @@ interface Props {
   liveNowSummary: string;
   recentCommitments: string[];
   transcriptSegments: TranscriptSegment[];
-  startTime: number | null;
+  finalSummary: string | null;
+  finalSummaryError: string | null;
+  isGeneratingSummary: boolean;
+  onGenerateSummary: () => void;
   factCheckClaims: string[];
   factCheckResults: FactCheckResult[];
   factCheckError: string | null;
@@ -44,7 +47,10 @@ export default function CopilotSidebar({
   liveNowSummary,
   recentCommitments,
   transcriptSegments,
-  startTime,
+  finalSummary,
+  finalSummaryError,
+  isGeneratingSummary,
+  onGenerateSummary,
   factCheckClaims,
   factCheckResults,
   factCheckError,
@@ -58,6 +64,24 @@ export default function CopilotSidebar({
   onChatMessageCountChange,
 }: Props) {
   const [tab, setTab] = useState<Tab>('insights');
+  const hasAutoFocusedActionsRef = useRef(false);
+
+  useEffect(() => {
+    if (isCapturing) {
+      hasAutoFocusedActionsRef.current = false;
+      return;
+    }
+
+    if (hasAutoFocusedActionsRef.current) return;
+    if (!isGeneratingSummary && !finalSummary && !finalSummaryError) return;
+
+    const frameId = requestAnimationFrame(() => {
+      setTab('actions');
+      hasAutoFocusedActionsRef.current = true;
+    });
+
+    return () => cancelAnimationFrame(frameId);
+  }, [finalSummary, finalSummaryError, isCapturing, isGeneratingSummary]);
 
   const tabs: { id: Tab; label: string; count?: number }[] = [
     { id: 'insights', label: 'Insights', count: insights.length || undefined },
@@ -208,10 +232,13 @@ export default function CopilotSidebar({
                 )}
               </div>
               <MeetingControls
+                isCapturing={isCapturing}
                 insights={insights}
-                actionItems={allActionItems}
                 transcriptSegments={transcriptSegments}
-                startTime={startTime}
+                isGeneratingSummary={isGeneratingSummary}
+                summary={finalSummary}
+                summaryError={finalSummaryError}
+                onGenerateSummary={onGenerateSummary}
               />
             </div>
           </ScrollArea>

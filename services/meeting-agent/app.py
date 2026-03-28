@@ -10,6 +10,11 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from fact_check import FACT_CHECK_FLOW, FactCheckRequest, FactCheckResponse
+from meeting_summary import (
+    MEETING_SUMMARY_FLOW,
+    MeetingSummaryRequest,
+    MeetingSummaryResponse,
+)
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 load_dotenv(ROOT_DIR / ".env.local", override=False)
@@ -218,6 +223,7 @@ async def health() -> dict[str, str]:
         "status": "ok",
         "flow": MEETING_COPILOT_FLOW.name,
         "fact_check_flow": FACT_CHECK_FLOW.name,
+        "meeting_summary_flow": MEETING_SUMMARY_FLOW.name,
     }
 
 
@@ -248,6 +254,20 @@ async def fact_check(payload: FactCheckRequest):
             max_claims=payload.maxClaims,
         )
         return response
+    except Exception as error:
+        return JSONResponse(status_code=500, content={"error": str(error)})
+
+
+@app.post("/summarize", response_model=MeetingSummaryResponse)
+async def summarize(payload: MeetingSummaryRequest):
+    try:
+        summary = await MEETING_SUMMARY_FLOW.ainvoke(
+            insights=payload.insights,
+            action_items=payload.actionItems,
+            transcript_segments=payload.transcriptSegments,
+            duration=payload.duration,
+        )
+        return MeetingSummaryResponse(summary=summary)
     except Exception as error:
         return JSONResponse(status_code=500, content={"error": str(error)})
 
