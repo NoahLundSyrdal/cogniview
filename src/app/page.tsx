@@ -1,65 +1,154 @@
-import Image from "next/image";
+'use client';
+
+import { useState, useCallback, useRef } from 'react';
+import { useScreenCapture } from '@/hooks/useScreenCapture';
+import { useMeetingContext } from '@/hooks/useMeetingContext';
+import ScreenCapture from '@/components/ScreenCapture';
+import CopilotSidebar from '@/components/CopilotSidebar';
+import type { FrameAnalysis } from '@/types';
 
 export default function Home() {
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [startTime, setStartTime] = useState<number | null>(null);
+  const latestAnalysisRef = useRef<FrameAnalysis | null>(null);
+
+  const {
+    insights,
+    messages,
+    context,
+    allActionItems,
+    addInsight,
+    addMessage,
+    getContextSummary,
+    reset,
+  } = useMeetingContext();
+
+  const handleFrame = useCallback(
+    async (frame: string) => {
+      setIsAnalyzing(true);
+      setAnalysisError(null);
+      try {
+        const res = await fetch('/api/analyze-frame', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ frame, previousContext: context }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setAnalysisError(data.error || `Analysis failed (HTTP ${res.status})`);
+        } else {
+          const analysis: FrameAnalysis = { ...data, timestamp: Date.now() };
+          addInsight(analysis);
+          latestAnalysisRef.current = analysis;
+        }
+      } catch (err) {
+        setAnalysisError('Network error — check your connection.');
+        console.error('Frame analysis failed:', err);
+      }
+      setIsAnalyzing(false);
+    },
+    [context, addInsight]
+  );
+
+  const { isCapturing, captureError, startCapture, stopCapture } = useScreenCapture(handleFrame);
+
+  const handleStart = useCallback(async () => {
+    reset();
+    setStartTime(Date.now());
+    setAnalysisError(null);
+    await startCapture();
+  }, [reset, startCapture]);
+
+  const handleStop = useCallback(() => {
+    stopCapture();
+  }, [stopCapture]);
+
+  const handleSendMessage = useCallback(
+    async (message: string) => {
+      addMessage({ role: 'user', content: message });
+      try {
+        const res = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message,
+            meetingContext: getContextSummary(),
+            screenAnalysis: latestAnalysisRef.current,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          addMessage({ role: 'assistant', content: `Error: ${data.error || 'Chat failed'}` });
+        } else {
+          addMessage({ role: 'assistant', content: data.response });
+        }
+      } catch (err) {
+        console.error('Chat failed:', err);
+        addMessage({ role: 'assistant', content: 'Network error. Please try again.' });
+      }
+    },
+    [addMessage, getContextSummary]
+  );
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+    <div className="flex h-screen bg-gray-950 text-white overflow-hidden">
+      {/* Main area */}
+      <div className="flex-1 flex flex-col items-center justify-center p-8 relative">
+        <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,rgba(99,102,241,0.08)_0%,transparent_70%)] pointer-events-none" />
+
+        <div className="relative z-10 flex flex-col items-center gap-2 mb-10">
+          <div className="flex items-center gap-2.5">
+            <span className="text-2xl">👁</span>
+            <h1 className="text-3xl font-bold tracking-tight">CogniView</h1>
+          </div>
+          <p className="text-gray-400 text-sm">AI that actually watches your screen</p>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+
+        <div className="relative z-10">
+          <ScreenCapture
+            isCapturing={isCapturing}
+            isAnalyzing={isAnalyzing}
+            captureError={captureError}
+            analysisError={analysisError}
+            onStart={handleStart}
+            onStop={handleStop}
+          />
         </div>
-      </main>
+
+        {isCapturing && (
+          <div className="relative z-10 mt-10 flex gap-6 text-center">
+            {[
+              { label: 'Frames analyzed', value: insights.length },
+              { label: 'Action items', value: allActionItems.length },
+              { label: 'Messages', value: messages.length },
+            ].map(({ label, value }) => (
+              <div key={label} className="flex flex-col gap-0.5">
+                <span className="text-2xl font-bold text-indigo-300">{value}</span>
+                <span className="text-xs text-gray-500">{label}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="absolute bottom-6 flex items-center gap-3 text-xs text-gray-600">
+          <span>Powered by</span>
+          <span className="text-gray-500">Gemini Vision</span>
+          <span>+</span>
+          <span className="text-gray-500">Claude AI</span>
+        </div>
+      </div>
+
+      <CopilotSidebar
+        insights={insights}
+        messages={messages}
+        isCapturing={isCapturing}
+        isAnalyzing={isAnalyzing}
+        allActionItems={allActionItems}
+        context={context}
+        onSendMessage={handleSendMessage}
+        startTime={startTime}
+      />
     </div>
   );
 }
