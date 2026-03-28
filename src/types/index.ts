@@ -36,8 +36,16 @@ export interface MeetingState {
 
 export type FactCheckVerdict = 'supported' | 'contradicted' | 'mixed' | 'insufficient_evidence';
 
+export type FactCheckStatementSource = 'voice' | 'visual';
+
 export interface FactCheckClaim {
   claim: string;
+}
+
+export interface FactCheckStatement {
+  claim: string;
+  source: FactCheckStatementSource;
+  priority?: number;
 }
 
 export interface FactCheckSource {
@@ -48,6 +56,7 @@ export interface FactCheckSource {
 
 export interface FactCheckResult {
   claim: string;
+  source: FactCheckStatementSource;
   verdict: FactCheckVerdict;
   confidence: number;
   summary: string;

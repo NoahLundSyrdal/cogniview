@@ -165,6 +165,15 @@ export function useMeetingContext() {
       .slice(-MAX_CONTEXT_CHARS);
   }, [getTranscriptSummary, insights]);
 
+  const getScreenSummary = useCallback(() => {
+    const recentInsights = insights.slice(-5);
+    const visualSummary = recentInsights
+      .map((i) => `[${new Date(i.timestamp).toLocaleTimeString()}] ${i.summary}`)
+      .join('\n');
+
+    return visualSummary.slice(-MAX_CONTEXT_CHARS);
+  }, [insights]);
+
   const getLiveNowSummary = useCallback(() => {
     const latestInsight = insights[insights.length - 1];
     const latestTranscript = transcriptSegments[transcriptSegments.length - 1];
@@ -220,6 +229,7 @@ export function useMeetingContext() {
     addTranscriptSegment,
     getTranscriptSummary,
     getContextSummary,
+    getScreenSummary,
     getLiveNowSummary,
     getRecentCommitments,
     reset,
