@@ -1,0 +1,5 @@
+# Submission-level Python dependencies for the Railtracks meeting agent.
+railtracks[cli]==1.3.6
+fastapi==0.135.2
+uvicorn==0.42.0
+python-dotenv==1.2.2
