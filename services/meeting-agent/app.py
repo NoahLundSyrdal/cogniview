@@ -22,11 +22,17 @@ class ScreenAnalysis(BaseModel):
     actionItems: list[str] = Field(default_factory=list)
 
 
+class ChatHistoryMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1)
+
+
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1)
     meetingContext: str | None = None
     screenAnalysis: ScreenAnalysis | None = None
     transcriptContext: str | None = None
+    chatHistory: list[ChatHistoryMessage] = Field(default_factory=list)
 
 
 class ChatResponse(BaseModel):
@@ -116,8 +122,14 @@ def build_system_message(
     meeting_context: str | None,
     screen_analysis: ScreenAnalysis | None,
     transcript_context: str | None,
+    chat_history_text: str | None = None,
 ) -> str:
     screen_context = build_screen_context(screen_analysis)
+    prior_chat = (
+        f"Recent copilot chat:\n{chat_history_text}\n\n"
+        if isinstance(chat_history_text, str) and chat_history_text.strip()
+        else ""
+    )
 
     return f"""You are an intelligent meeting copilot. You are watching the user's screen in real-time during their meeting.
 
@@ -129,7 +141,7 @@ Meeting history so far:
 Recent spoken transcript:
 {transcript_context or 'No transcript available yet.'}
 
-Your role:
+{prior_chat}Your role:
 - Answer questions about what's being presented on screen
 - Suggest questions the user could ask the presenter
 - Highlight important points or action items
@@ -140,11 +152,21 @@ Your role:
 Respond in 1-3 sentences unless a detailed explanation is genuinely needed."""
 
 
+def build_chat_history_text(chat_history: list[ChatHistoryMessage]) -> str | None:
+    lines = [
+        f"{'User' if message.role == 'user' else 'Assistant'}: {message.content.strip()}"
+        for message in chat_history[-10:]
+        if message.content.strip()
+    ]
+    return "\n".join(lines) if lines else None
+
+
 @rt.function_node
 async def meeting_copilot_reply(
     message: str,
     meeting_context: str | None = None,
     transcript_context: str | None = None,
+    chat_history_text: str | None = None,
     screen_type: str | None = None,
     screen_summary: str | None = None,
     screen_key_points: list[str] | None = None,
@@ -153,6 +175,7 @@ async def meeting_copilot_reply(
     system_message = build_system_message(
         meeting_context=meeting_context,
         transcript_context=transcript_context,
+        chat_history_text=chat_history_text,
         screen_analysis=ScreenAnalysis(
             screenType=screen_type,
             summary=screen_summary,
@@ -200,6 +223,7 @@ async def chat(payload: ChatRequest):
             message=payload.message.strip(),
             meeting_context=payload.meetingContext,
             transcript_context=payload.transcriptContext,
+            chat_history_text=build_chat_history_text(payload.chatHistory),
             screen_type=payload.screenAnalysis.screenType if payload.screenAnalysis else None,
             screen_summary=payload.screenAnalysis.summary if payload.screenAnalysis else None,
             screen_key_points=payload.screenAnalysis.keyPoints if payload.screenAnalysis else None,

@@ -50,6 +50,7 @@ Copy `.env.example` to `.env` and fill in keys for the provider(s) you want to u
 - `RAILTRACKS_LLM_PROVIDER` - optional override for the Railtracks service: `anthropic` or `openai`.
 - `RAILTRACKS_ANTHROPIC_MODEL` - optional Anthropic model override for the Railtracks service.
 - `RAILTRACKS_OPENAI_MODEL` - optional OpenAI model override for the Railtracks service.
+- `NEXT_PUBLIC_ASSISTANT_UI_DEFAULT_MODE` - default chat mode for the Assistant UI panel: `v1` for direct model streaming or `v2` for Railtracks-backed responses.
 
 ### Fact-checking settings
 
@@ -85,3 +86,18 @@ Then start the Next app as usual with `npm run dev`. When `RAILTRACKS_AGENT_URL`
 ### Railtracks observability
 
 [`requirements.txt`](requirements.txt) installs `railtracks[cli]`, so once the Python service is running you can also use the Railtracks CLI tools locally, including `railtracks viz`, against the flows executed by the service.
+
+## Assistant UI
+
+The chat tab now uses Assistant UI primitives and supports two backend modes through [`src/app/api/assistant-ui/chat/route.ts`](src/app/api/assistant-ui/chat/route.ts):
+
+- `v1` - direct streaming through the AI SDK using the repo's normal provider selection
+- `v2` - Assistant UI frontend with responses delegated to the Railtracks Python service
+
+The mode switch is built into the sidebar, and the default can be set with:
+
+```bash
+NEXT_PUBLIC_ASSISTANT_UI_DEFAULT_MODE=v2
+```
+
+The chat UI component is in [`src/components/AssistantCopilotChat.tsx`](src/components/AssistantCopilotChat.tsx).

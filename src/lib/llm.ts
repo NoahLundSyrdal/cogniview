@@ -3,9 +3,9 @@ import OpenAI from 'openai';
 import type { Uploadable } from 'openai/uploads';
 import type { FactCheckResult, FactCheckSource, FactCheckVerdict } from '@/types';
 
-type Provider = 'anthropic' | 'openai';
+export type Provider = 'anthropic' | 'openai';
 
-function resolveProvider(): Provider {
+export function resolveProvider(): Provider {
   const explicit = process.env.LLM_PROVIDER?.toLowerCase().trim();
   if (explicit === 'openai' || explicit === 'anthropic') {
     return explicit;
