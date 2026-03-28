@@ -1,6 +1,6 @@
 # CogniView
 
-**AI that actually watches your screen.**
+**Multimodal AI that watches your screen and listens.**
 
 CogniView is an autonomous meeting copilot for presentations and screen shares. It watches the live screen, listens to the conversation, helps with contextual chat during the meeting, fact-checks risky claims, and generates a final summary after the meeting ends.
 
