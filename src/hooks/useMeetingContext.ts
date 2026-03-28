@@ -114,6 +114,16 @@ function isNearDuplicateSignal(left: string, right: string) {
   return signalSimilarity(left, right) >= 0.74;
 }
 
+function isNearDuplicateSummary(left: string, right: string) {
+  const normalizedLeft = normalizeSignalText(left);
+  const normalizedRight = normalizeSignalText(right);
+
+  if (!normalizedLeft || !normalizedRight) return false;
+  if (normalizedLeft === normalizedRight) return true;
+
+  return isNearDuplicateSignal(left, right);
+}
+
 export function useMeetingContext() {
   const [insights, setInsights] = useState<FrameAnalysis[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -270,7 +280,17 @@ export function useMeetingContext() {
 
   const getScreenSummary = useCallback(() => {
     const recentInsights = insights.slice(-5);
+    const distinctSummaries: string[] = [];
     const visualSummary = recentInsights
+      .filter((insight) => {
+        const summary = insight.summary.trim();
+        if (!summary) return false;
+        if (distinctSummaries.some((existing) => isNearDuplicateSummary(existing, summary))) {
+          return false;
+        }
+        distinctSummaries.push(summary);
+        return true;
+      })
       .map((insight) => `[${new Date(insight.timestamp).toLocaleTimeString()}] ${insight.summary}`)
       .join('\n');
     return visualSummary.slice(-MAX_CONTEXT_CHARS);

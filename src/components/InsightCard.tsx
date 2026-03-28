@@ -11,6 +11,7 @@ const screenTypeColors: Record<string, string> = {
   dashboard: 'bg-purple-500/20 text-purple-300 border-purple-500/30',
   video: 'bg-red-500/20 text-red-300 border-red-500/30',
   browser: 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30',
+  voice: 'bg-violet-500/20 text-violet-300 border-violet-500/30',
   other: 'bg-gray-500/20 text-gray-300 border-gray-500/30',
 };
 
@@ -21,6 +22,7 @@ interface Props {
 
 export default function InsightCard({ insight, isLatest }: Props) {
   const colorClass = screenTypeColors[insight.screenType] || screenTypeColors.other;
+  const label = insight.source === 'voice' || insight.screenType === 'voice' ? 'voice' : insight.screenType;
   const time = new Date(insight.timestamp).toLocaleTimeString([], {
     hour: '2-digit',
     minute: '2-digit',
@@ -34,7 +36,7 @@ export default function InsightCard({ insight, isLatest }: Props) {
       <CardContent className="p-3 space-y-2">
         <div className="flex items-center justify-between gap-2">
           <Badge variant="outline" className={`text-xs ${colorClass}`}>
-            {insight.screenType}
+            {label}
           </Badge>
           <span className="text-xs text-gray-500">{time}</span>
         </div>
