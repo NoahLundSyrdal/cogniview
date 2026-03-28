@@ -7,6 +7,7 @@ interface Props {
   isCapturing: boolean;
   isRunning: boolean;
   error: string | null;
+  status: string | null;
   claims: string[];
   results: FactCheckResult[];
   onRun: () => Promise<void>;
@@ -33,7 +34,15 @@ const verdictClass: Record<FactCheckVerdict, string> = {
   insufficient_evidence: 'border-gray-600 bg-gray-800/60 text-gray-300',
 };
 
-export default function FactCheckPanel({ isCapturing, isRunning, error, claims, results, onRun }: Props) {
+export default function FactCheckPanel({
+  isCapturing,
+  isRunning,
+  error,
+  status,
+  claims,
+  results,
+  onRun,
+}: Props) {
   return (
     <div className="p-3 space-y-3">
       <div className="space-y-1">
@@ -60,6 +69,12 @@ export default function FactCheckPanel({ isCapturing, isRunning, error, claims, 
       {error && (
         <div className="rounded border border-red-500/30 bg-red-500/10 px-2.5 py-2 text-xs text-red-300">
           {error}
+        </div>
+      )}
+
+      {status && !error && (
+        <div className="rounded border border-indigo-500/30 bg-indigo-500/10 px-2.5 py-2 text-xs text-indigo-200">
+          {status}
         </div>
       )}
 

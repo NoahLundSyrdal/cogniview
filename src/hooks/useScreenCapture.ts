@@ -3,6 +3,10 @@
 import { useState, useRef, useCallback } from 'react';
 
 const FRAME_INTERVAL_MS = 3000;
+const FRAME_FINGERPRINT_WIDTH = 32;
+const FRAME_FINGERPRINT_HEIGHT = 18;
+const FRAME_CHANGE_RATIO_THRESHOLD = 0.03;
+const FRAME_CHANGE_BUCKET_DELTA = 2;
 const AUDIO_TIMESLICE_MS = 5000;
 const MIN_AUDIO_CHUNK_BYTES = 2048;
 const AUDIO_MIME_TYPES = [
@@ -21,10 +25,51 @@ function getSupportedAudioMimeType() {
   return AUDIO_MIME_TYPES.find((mimeType) => MediaRecorder.isTypeSupported(mimeType));
 }
 
+function createFrameFingerprint(
+  video: HTMLVideoElement,
+  canvas: HTMLCanvasElement,
+  context: CanvasRenderingContext2D
+) {
+  canvas.width = FRAME_FINGERPRINT_WIDTH;
+  canvas.height = FRAME_FINGERPRINT_HEIGHT;
+  context.drawImage(video, 0, 0, FRAME_FINGERPRINT_WIDTH, FRAME_FINGERPRINT_HEIGHT);
+
+  const imageData = context.getImageData(0, 0, FRAME_FINGERPRINT_WIDTH, FRAME_FINGERPRINT_HEIGHT).data;
+  const fingerprint = new Uint8Array(FRAME_FINGERPRINT_WIDTH * FRAME_FINGERPRINT_HEIGHT);
+
+  for (let sourceIndex = 0, targetIndex = 0; sourceIndex < imageData.length; sourceIndex += 4, targetIndex += 1) {
+    const red = imageData[sourceIndex];
+    const green = imageData[sourceIndex + 1];
+    const blue = imageData[sourceIndex + 2];
+    const luminance = 0.299 * red + 0.587 * green + 0.114 * blue;
+    fingerprint[targetIndex] = Math.round(luminance / 17);
+  }
+
+  return fingerprint;
+}
+
+function hasMeaningfulFrameChange(previous: Uint8Array | null, next: Uint8Array) {
+  if (!previous || previous.length !== next.length) {
+    return true;
+  }
+
+  let changedBuckets = 0;
+  for (let index = 0; index < next.length; index += 1) {
+    if (Math.abs(previous[index] - next[index]) >= FRAME_CHANGE_BUCKET_DELTA) {
+      changedBuckets += 1;
+    }
+  }
+
+  return changedBuckets / next.length >= FRAME_CHANGE_RATIO_THRESHOLD;
+}
+
 export function useScreenCapture({ onFrame, onAudioChunk }: UseScreenCaptureOptions) {
   const [isCapturing, setIsCapturing] = useState(false);
   const [captureError, setCaptureError] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const fingerprintCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const fingerprintContextRef = useRef<CanvasRenderingContext2D | null>(null);
+  const lastFrameFingerprintRef = useRef<Uint8Array | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const audioSegmentTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const displayStreamRef = useRef<MediaStream | null>(null);
@@ -71,6 +116,9 @@ export function useScreenCapture({ onFrame, onAudioChunk }: UseScreenCaptureOpti
       videoRef.current.srcObject = null;
       videoRef.current = null;
     }
+    fingerprintCanvasRef.current = null;
+    fingerprintContextRef.current = null;
+    lastFrameFingerprintRef.current = null;
 
     setIsCapturing(false);
   }, []);
@@ -104,13 +152,33 @@ export function useScreenCapture({ onFrame, onAudioChunk }: UseScreenCaptureOpti
       video.playsInline = true;
       void video.play();
       videoRef.current = video;
+      const fingerprintCanvas = document.createElement('canvas');
+      const fingerprintContext = fingerprintCanvas.getContext('2d');
+      if (!fingerprintContext) {
+        throw new Error('Canvas 2D context is unavailable for screen capture.');
+      }
+      fingerprintCanvasRef.current = fingerprintCanvas;
+      fingerprintContextRef.current = fingerprintContext;
+      lastFrameFingerprintRef.current = null;
 
       await new Promise<void>((resolve) => {
         video.onloadedmetadata = () => resolve();
       });
 
       intervalRef.current = setInterval(() => {
-        if (!videoRef.current) return;
+        if (!videoRef.current || !fingerprintCanvasRef.current || !fingerprintContextRef.current) return;
+        if (videoRef.current.videoWidth === 0 || videoRef.current.videoHeight === 0) return;
+
+        const fingerprint = createFrameFingerprint(
+          videoRef.current,
+          fingerprintCanvasRef.current,
+          fingerprintContextRef.current
+        );
+        if (!hasMeaningfulFrameChange(lastFrameFingerprintRef.current, fingerprint)) {
+          return;
+        }
+
+        lastFrameFingerprintRef.current = fingerprint;
         const canvas = document.createElement('canvas');
         canvas.width = videoRef.current.videoWidth;
         canvas.height = videoRef.current.videoHeight;

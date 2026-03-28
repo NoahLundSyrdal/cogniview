@@ -32,6 +32,7 @@ Analyze the current screen and respond with ONLY valid JSON (no markdown, no cod
   "suggestedQuestions": ["A clarifying question the viewer might want to ask"],
   "actionItems": ["Any action items visible or implied by the content"],
   "factCheckFlags": ["Any claims or statistics that might need verification"],
+  "sceneSignature": "6-12 words capturing the core subject of this screen; keep stable across tiny scroll/layout changes",
   "contextForNext": "1 sentence context to carry forward for next frame analysis"
 }
 
@@ -43,6 +44,7 @@ Rules:
 - If the screen appears unchanged, prefer actionItems: [] to avoid spam, but still include explicit tasks when they are clearly actionable.
 - Avoid repeating the same task unless there is materially new detail (owner, deadline, scope, or status).
 - factCheckFlags only for specific claims with numbers or controversial statements.
+- sceneSignature should stay the same if the screen is materially the same content with only minor scrolling or layout shifts.
 - If screen appears unchanged from context, note that briefly.`;
 
     const text = await completeVision({
@@ -67,6 +69,7 @@ Rules:
           suggestedQuestions: [],
           actionItems: [],
           factCheckFlags: [],
+          sceneSignature: '',
           contextForNext: text,
         };
       }

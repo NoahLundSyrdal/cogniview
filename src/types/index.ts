@@ -5,6 +5,7 @@ export interface FrameAnalysis {
   suggestedQuestions: string[];
   actionItems: string[];
   factCheckFlags: string[];
+  sceneSignature?: string;
   contextForNext: string;
   timestamp: number;
 }

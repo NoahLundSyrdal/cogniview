@@ -62,13 +62,13 @@ export default function ScreenCapture({
             {isAnalyzing || isTranscribing ? (
               <p className="text-gray-500 text-xs animate-pulse">
                 {isAnalyzing && isTranscribing
-                  ? 'Analyzing frames and transcribing audio...'
+                  ? 'Analyzing changed screens and transcribing audio...'
                   : isAnalyzing
-                  ? 'Analyzing frame...'
+                  ? 'Analyzing changed screen...'
                   : 'Transcribing audio...'}
               </p>
             ) : (
-              <p className="text-gray-500 text-xs">Next frame analysis in ~3s</p>
+              <p className="text-gray-500 text-xs">Checking for screen changes every ~3s</p>
             )}
           </>
         ) : (
@@ -115,7 +115,7 @@ export default function ScreenCapture({
       {!isCapturing && !captureError && (
         <div className="grid grid-cols-2 gap-4 mt-4 max-w-md text-center sm:grid-cols-4">
           {[
-            { icon: '📸', label: 'Captures frames', sub: 'every 3 seconds' },
+            { icon: '📸', label: 'Samples frames', sub: 'analyzes on change' },
             { icon: '🎙', label: 'Records audio', sub: 'screen + mic when allowed' },
             { icon: '🔍', label: 'Gemini Vision', sub: 'analyzes content' },
             { icon: '📝', label: '4o Transcribe', sub: 'turns speech into text' },

@@ -15,11 +15,142 @@ const TRANSCRIPT_ACTION_MAX_CHARS = 2000;
 const DEFAULT_COMMITMENTS_WINDOW_MS = 120000;
 const DEFAULT_COMMITMENTS_MAX_ITEMS = 2;
 
+const DUPLICATE_INSIGHT_SUMMARY_THRESHOLD = 0.58;
+const DUPLICATE_INSIGHT_LIST_THRESHOLD = 0.5;
+const DUPLICATE_INSIGHT_COMBINED_THRESHOLD = 0.64;
+const DUPLICATE_INSIGHT_MEDIUM_THRESHOLD = 0.42;
+const DUPLICATE_INSIGHT_WINDOW_MS = 45000;
+const DUPLICATE_INSIGHT_RECENT_LIMIT = 6;
+const DOMAIN_RE = /\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b/gi;
+const QUOTED_TEXT_RE = /["'“”‘’]([^"'“”‘’]{8,160})["'“”‘’]/g;
+
 function parsePositiveInt(raw: string | undefined, fallback: number) {
   if (!raw) return fallback;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return Math.floor(parsed);
+}
+
+function normalizeInsightText(text: string) {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function tokenizeInsightText(text: string) {
+  const normalized = normalizeInsightText(text);
+  return normalized ? normalized.split(' ') : [];
+}
+
+function buildInsightCombinedText(analysis: FrameAnalysis) {
+  return [
+    analysis.sceneSignature || '',
+    analysis.summary,
+    ...analysis.keyPoints,
+    ...analysis.suggestedQuestions,
+    ...analysis.factCheckFlags,
+    ...analysis.actionItems,
+  ]
+    .map(normalizeInsightText)
+    .filter(Boolean)
+    .join(' ');
+}
+
+function extractSalientMarkers(analysis: FrameAnalysis) {
+  const markers = new Set<string>();
+  const sourceTexts = [
+    analysis.sceneSignature || '',
+    analysis.summary,
+    ...analysis.keyPoints,
+    ...analysis.suggestedQuestions,
+    ...analysis.factCheckFlags,
+  ];
+
+  for (const rawText of sourceTexts) {
+    if (!rawText) continue;
+
+    const domainMatches = rawText.match(DOMAIN_RE) || [];
+    for (const match of domainMatches) {
+      const normalized = normalizeInsightText(match);
+      if (normalized) {
+        markers.add(normalized);
+      }
+    }
+
+    for (const match of rawText.matchAll(QUOTED_TEXT_RE)) {
+      const normalized = normalizeInsightText(match[1] || '');
+      if (normalized) {
+        markers.add(normalized);
+      }
+    }
+  }
+
+  return markers;
+}
+
+function jaccardSimilarity(left: string[], right: string[]) {
+  if (left.length === 0 && right.length === 0) return 1;
+  if (left.length === 0 || right.length === 0) return 0;
+
+  const leftSet = new Set(left);
+  const rightSet = new Set(right);
+  let intersection = 0;
+  for (const token of leftSet) {
+    if (rightSet.has(token)) {
+      intersection += 1;
+    }
+  }
+
+  const union = new Set([...leftSet, ...rightSet]).size;
+  return union === 0 ? 0 : intersection / union;
+}
+
+function listSimilarity(left: string[], right: string[]) {
+  const leftTokens = left.map(normalizeInsightText).filter(Boolean);
+  const rightTokens = right.map(normalizeInsightText).filter(Boolean);
+  return jaccardSimilarity(leftTokens, rightTokens);
+}
+
+function isNearDuplicateInsight(previous: FrameAnalysis | null, next: FrameAnalysis) {
+  if (!previous) return false;
+  if (previous.screenType !== next.screenType) return false;
+
+  const previousSignature = normalizeInsightText(previous.sceneSignature || '');
+  const nextSignature = normalizeInsightText(next.sceneSignature || '');
+  if (previousSignature && nextSignature && previousSignature === nextSignature) {
+    return true;
+  }
+
+  const summarySimilarity = jaccardSimilarity(
+    tokenizeInsightText(previous.summary),
+    tokenizeInsightText(next.summary)
+  );
+  const keyPointSimilarity = listSimilarity(previous.keyPoints, next.keyPoints);
+  const questionSimilarity = listSimilarity(previous.suggestedQuestions, next.suggestedQuestions);
+  const flagSimilarity = listSimilarity(previous.factCheckFlags, next.factCheckFlags);
+  const actionSimilarity = listSimilarity(previous.actionItems, next.actionItems);
+  const combinedSimilarity = jaccardSimilarity(
+    tokenizeInsightText(buildInsightCombinedText(previous)),
+    tokenizeInsightText(buildInsightCombinedText(next))
+  );
+  const previousMarkers = extractSalientMarkers(previous);
+  const nextMarkers = extractSalientMarkers(next);
+  const sharesMarker = [...previousMarkers].some((marker) => nextMarkers.has(marker));
+
+  const structurallySame =
+    keyPointSimilarity >= DUPLICATE_INSIGHT_LIST_THRESHOLD &&
+    questionSimilarity >= DUPLICATE_INSIGHT_LIST_THRESHOLD &&
+    flagSimilarity >= DUPLICATE_INSIGHT_LIST_THRESHOLD &&
+    actionSimilarity >= DUPLICATE_INSIGHT_LIST_THRESHOLD;
+
+  return (
+    combinedSimilarity >= DUPLICATE_INSIGHT_COMBINED_THRESHOLD ||
+    (sharesMarker && combinedSimilarity >= DUPLICATE_INSIGHT_MEDIUM_THRESHOLD) ||
+    (summarySimilarity >= DUPLICATE_INSIGHT_SUMMARY_THRESHOLD &&
+      (structurallySame || combinedSimilarity >= DUPLICATE_INSIGHT_LIST_THRESHOLD))
+  );
 }
 
 export default function Home() {
@@ -32,14 +163,19 @@ export default function Home() {
   const [startTime, setStartTime] = useState<number | null>(null);
   const [isFactChecking, setIsFactChecking] = useState(false);
   const [factCheckError, setFactCheckError] = useState<string | null>(null);
+  const [factCheckStatus, setFactCheckStatus] = useState<string | null>(null);
   const [factCheckClaims, setFactCheckClaims] = useState<string[]>([]);
   const [factCheckResults, setFactCheckResults] = useState<FactCheckResult[]>([]);
+  const insightsRef = useRef<FrameAnalysis[]>([]);
   const latestAnalysisRef = useRef<FrameAnalysis | null>(null);
   const transcriptQueueRef = useRef<Promise<void>>(Promise.resolve());
   const transcriptActionQueueRef = useRef<Promise<void>>(Promise.resolve());
   const lastTranscriptActionRunAtRef = useRef(0);
   const lastTranscriptActionInputRef = useRef('');
   const latestFrameRef = useRef<string | null>(null);
+  const lastFactCheckedFrameRef = useRef<string | null>(null);
+  const pendingFactCheckFrameRef = useRef<string | null>(null);
+  const isFactCheckingRef = useRef(false);
   const {
     isOpen: isSidebarDetached,
     mode: detachedSidebarMode,
@@ -80,9 +216,56 @@ export default function Home() {
     DEFAULT_COMMITMENTS_MAX_ITEMS
   );
 
+  useEffect(() => {
+    insightsRef.current = insights;
+  }, [insights]);
+
+  const runFactCheckForFrame = useCallback(
+    async (frame: string) => {
+      pendingFactCheckFrameRef.current = null;
+      setFactCheckStatus(null);
+      setFactCheckError(null);
+      setIsFactChecking(true);
+      isFactCheckingRef.current = true;
+
+      try {
+        const res = await fetch('/api/fact-check', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            frame,
+            meetingContext: getContextSummary(),
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setFactCheckError(data.error || 'Fact-check failed');
+          return;
+        }
+        lastFactCheckedFrameRef.current = frame;
+        setFactCheckClaims(Array.isArray(data.claims) ? data.claims : []);
+        setFactCheckResults(Array.isArray(data.results) ? data.results : []);
+      } catch (err) {
+        console.error('Fact-check failed:', err);
+        setFactCheckError('Network error. Please try again.');
+      } finally {
+        setIsFactChecking(false);
+        isFactCheckingRef.current = false;
+      }
+    },
+    [getContextSummary]
+  );
+
   const handleFrame = useCallback(
     async (frame: string) => {
       latestFrameRef.current = frame;
+      if (
+        pendingFactCheckFrameRef.current &&
+        frame !== pendingFactCheckFrameRef.current &&
+        !isFactCheckingRef.current
+      ) {
+        void runFactCheckForFrame(frame);
+      }
       setIsAnalyzing(true);
       setAnalysisError(null);
       const transcriptSummary = getTranscriptSummary();
@@ -105,7 +288,18 @@ export default function Home() {
         if (!res.ok) {
           setAnalysisError(data.error || `Analysis failed (HTTP ${res.status})`);
         } else {
-          const analysis: FrameAnalysis = { ...data, timestamp: Date.now() };
+          const analysis: FrameAnalysis = {
+            ...data,
+            sceneSignature:
+              typeof data.sceneSignature === 'string' ? data.sceneSignature.trim() : '',
+            timestamp: Date.now(),
+          };
+          const recentInsights = insightsRef.current
+            .filter((item) => analysis.timestamp - item.timestamp <= DUPLICATE_INSIGHT_WINDOW_MS)
+            .slice(-DUPLICATE_INSIGHT_RECENT_LIMIT);
+          if (recentInsights.some((item) => isNearDuplicateInsight(item, analysis))) {
+            return;
+          }
           addInsight(analysis);
           latestAnalysisRef.current = analysis;
         }
@@ -115,7 +309,7 @@ export default function Home() {
       }
       setIsAnalyzing(false);
     },
-    [context, addInsight, getTranscriptSummary]
+    [context, addInsight, getTranscriptSummary, runFactCheckForFrame]
   );
 
   const handleAudioChunk = useCallback(
@@ -221,8 +415,12 @@ export default function Home() {
     lastTranscriptActionInputRef.current = '';
     latestFrameRef.current = null;
     setFactCheckError(null);
+    setFactCheckStatus(null);
     setFactCheckClaims([]);
     setFactCheckResults([]);
+    lastFactCheckedFrameRef.current = null;
+    pendingFactCheckFrameRef.current = null;
+    isFactCheckingRef.current = false;
     const didStart = await startCapture();
 
     if (!didStart) {
@@ -236,6 +434,8 @@ export default function Home() {
   }, [closeSidebarWindow, openSidebarWindow, reset, startCapture]);
 
   const handleStop = useCallback(() => {
+    pendingFactCheckFrameRef.current = null;
+    setFactCheckStatus(null);
     stopCapture();
   }, [stopCapture]);
 
@@ -243,34 +443,21 @@ export default function Home() {
     const latestFrame = latestFrameRef.current;
     if (!latestFrame) {
       setFactCheckError('No captured frame available yet.');
+      setFactCheckStatus(null);
       return;
     }
 
-    setFactCheckError(null);
-    setIsFactChecking(true);
-    try {
-      const res = await fetch('/api/fact-check', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          frame: latestFrame,
-          meetingContext: getContextSummary(),
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setFactCheckError(data.error || 'Fact-check failed');
-        return;
-      }
-      setFactCheckClaims(Array.isArray(data.claims) ? data.claims : []);
-      setFactCheckResults(Array.isArray(data.results) ? data.results : []);
-    } catch (err) {
-      console.error('Fact-check failed:', err);
-      setFactCheckError('Network error. Please try again.');
-    } finally {
-      setIsFactChecking(false);
+    if (latestFrame === lastFactCheckedFrameRef.current) {
+      pendingFactCheckFrameRef.current = latestFrame;
+      setFactCheckError(null);
+      setFactCheckStatus(
+        'Screen is unchanged. Waiting for a new screen before running fact-check again.'
+      );
+      return;
     }
-  }, [getContextSummary]);
+
+    await runFactCheckForFrame(latestFrame);
+  }, [runFactCheckForFrame]);
 
   const sidebarProps = {
     insights,
@@ -286,6 +473,7 @@ export default function Home() {
     factCheckClaims,
     factCheckResults,
     factCheckError,
+    factCheckStatus,
     isFactChecking,
     onRunFactCheck: handleRunFactCheck,
     meetingContext: getContextSummary(),
