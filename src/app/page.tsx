@@ -14,8 +14,6 @@ import type { FrameAnalysis, FactCheckResult } from '@/types';
 
 const TRANSCRIPT_ACTION_INTERVAL_MS = 15000;
 const TRANSCRIPT_ACTION_MAX_CHARS = 2000;
-const DEFAULT_COMMITMENTS_WINDOW_MS = 120000;
-const DEFAULT_COMMITMENTS_MAX_ITEMS = 2;
 
 const DUPLICATE_INSIGHT_SUMMARY_THRESHOLD = 0.58;
 const DUPLICATE_INSIGHT_LIST_THRESHOLD = 0.5;
@@ -26,11 +24,9 @@ const DUPLICATE_INSIGHT_RECENT_LIMIT = 6;
 const DOMAIN_RE = /\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b/gi;
 const QUOTED_TEXT_RE = /["'“”‘’]([^"'“”‘’]{8,160})["'“”‘’]/g;
 
-function parsePositiveInt(raw: string | undefined, fallback: number) {
-  if (!raw) return fallback;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
-  return Math.floor(parsed);
+function normalizeStringArray(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
 }
 
 function normalizeInsightText(text: string) {
@@ -205,24 +201,17 @@ export default function Home() {
     insights,
     context,
     allActionItems,
+    actionSignals,
+    decisionSignals,
+    openQuestionSignals,
     transcriptSegments,
     addInsight,
-    addActionItems,
+    addMeetingSignals,
     addTranscriptSegment,
     getTranscriptSummary,
     getContextSummary,
-    getLiveNowSummary,
-    getRecentCommitments,
     reset,
   } = useMeetingContext();
-  const commitmentsWindowMs = parsePositiveInt(
-    process.env.NEXT_PUBLIC_COMMITMENTS_WINDOW_MS,
-    DEFAULT_COMMITMENTS_WINDOW_MS
-  );
-  const commitmentsMaxItems = parsePositiveInt(
-    process.env.NEXT_PUBLIC_COMMITMENTS_MAX_ITEMS,
-    DEFAULT_COMMITMENTS_MAX_ITEMS
-  );
   const hasMeetingData = insights.length > 0 || transcriptSegments.length > 0;
 
   useEffect(() => {
@@ -438,9 +427,11 @@ export default function Home() {
           });
           const data = await res.json();
           if (!res.ok) return;
-          if (Array.isArray(data.actionItems) && data.actionItems.length > 0) {
-            addActionItems(data.actionItems);
-          }
+          addMeetingSignals({
+            actionItems: normalizeStringArray(data.actionItems),
+            decisions: normalizeStringArray(data.decisions),
+            openQuestions: normalizeStringArray(data.openQuestions),
+          });
         } catch (err) {
           console.error('Transcript commitment extraction failed:', err);
         } finally {
@@ -449,7 +440,7 @@ export default function Home() {
       });
 
     await transcriptActionQueueRef.current;
-  }, [addActionItems, getContextSummary, getTranscriptSummary]);
+  }, [addMeetingSignals, getContextSummary, getTranscriptSummary]);
 
   const { isCapturing, captureError, startCapture, stopCapture } = useScreenCapture({
     onFrame: handleFrame,
@@ -559,9 +550,9 @@ export default function Home() {
     isCapturing,
     isAnalyzing: isAnalyzing || activeTranscriptJobs > 0,
     isTranscribing: activeTranscriptJobs > 0,
-    allActionItems,
-    liveNowSummary: getLiveNowSummary(),
-    recentCommitments: getRecentCommitments(commitmentsWindowMs, commitmentsMaxItems),
+    actionSignals,
+    decisionSignals,
+    openQuestionSignals,
     transcriptSegments,
     finalSummary,
     finalSummaryError,

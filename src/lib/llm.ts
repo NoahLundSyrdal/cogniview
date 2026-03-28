@@ -160,16 +160,23 @@ export async function transcribeAudio(params: {
   return transcription.text.trim();
 }
 
-export async function extractActionItemsFromTranscript(params: {
+export async function extractMeetingSignalsFromTranscript(params: {
   transcriptText: string;
   meetingContext?: string;
   maxItems?: number;
-}): Promise<string[]> {
+}): Promise<{
+  actionItems: string[];
+  decisions: string[];
+  openQuestions: string[];
+}> {
   const transcriptText = params.transcriptText.replace(/\s+/g, ' ').trim();
-  if (!transcriptText) return [];
+  if (!transcriptText) {
+    return { actionItems: [], decisions: [], openQuestions: [] };
+  }
 
   const requestedMaxItems = params.maxItems ?? 5;
   const maxItems = Math.max(1, Math.min(12, Math.floor(requestedMaxItems)));
+  const maxSecondaryItems = Math.max(2, Math.min(8, Math.floor(maxItems)));
   const contextBlock = params.meetingContext?.trim()
     ? `Meeting context:\n${params.meetingContext.trim()}\n\n`
     : '';
@@ -177,42 +184,76 @@ export async function extractActionItemsFromTranscript(params: {
   const userPrompt = `${contextBlock}Transcript excerpt:
 ${transcriptText}
 
-Extract only explicit action items from what speakers actually said.
-- Include only real tasks, follow-ups, decisions that imply work, or commitments.
-- Prefer concrete phrasing with owner/deadline only if explicitly spoken.
-- Do not invent tasks that were not stated.
-- Do not include generic advice, summaries, or discussion topics.
+Extract only concrete meeting signals that speakers explicitly said or clearly committed to.
+
+Return JSON only in this exact shape:
+{"actionItems":["..."],"decisions":["..."],"openQuestions":["..."]}
+
+Rules:
+- Some meetings do not contain any real todo list. Leave actionItems empty when nobody was actually assigned or committed to follow-up work.
+- actionItems: concrete follow-ups, commitments, ownership, deadlines, or next steps that imply real work.
+- decisions: explicit conclusions, approvals, chosen options, or changes in direction that were actually stated.
+- openQuestions: unresolved questions, blockers, or things speakers said still need clarification.
+- Do not invent details that were not spoken.
+- Do not restate the whole conversation.
+- Prefer concise, specific phrasing.
+- Include owner/date only when explicitly spoken.
 - Deduplicate semantically similar items.
-- Return JSON only in this exact shape: {"actionItems":["..."]}.
-- Return at most ${maxItems} action items.`;
+- Return at most ${maxItems} action items.
+- Return at most ${maxSecondaryItems} decisions.
+- Return at most ${maxSecondaryItems} open questions.`;
 
   const raw = await completeText({
-    system: 'You extract action items from meeting transcripts and return strict JSON.',
+    system: 'You extract structured meeting signals from transcript excerpts and return strict JSON.',
     user: userPrompt,
-    maxTokens: 700,
+    maxTokens: 900,
   });
   const jsonBlob = parseFirstJsonObject(raw);
-  if (!jsonBlob) return [];
+  if (!jsonBlob) {
+    return { actionItems: [], decisions: [], openQuestions: [] };
+  }
 
   try {
-    const parsed = JSON.parse(jsonBlob) as { actionItems?: unknown };
-    if (!Array.isArray(parsed.actionItems)) return [];
-    const seen = new Set<string>();
-    const items: string[] = [];
-    for (const item of parsed.actionItems) {
-      if (typeof item !== 'string') continue;
-      const clean = item.trim().replace(/\s+/g, ' ');
-      if (!clean) continue;
-      const key = clean.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      items.push(clean);
-      if (items.length >= maxItems) break;
-    }
-    return items;
+    const parsed = JSON.parse(jsonBlob) as {
+      actionItems?: unknown;
+      decisions?: unknown;
+      openQuestions?: unknown;
+    };
+
+    const normalizeStringItems = (value: unknown, limit: number) => {
+      if (!Array.isArray(value)) return [];
+      const seen = new Set<string>();
+      const items: string[] = [];
+      for (const item of value) {
+        if (typeof item !== 'string') continue;
+        const clean = item.trim().replace(/\s+/g, ' ');
+        if (!clean) continue;
+        const key = clean.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        items.push(clean);
+        if (items.length >= limit) break;
+      }
+      return items;
+    };
+
+    return {
+      actionItems: normalizeStringItems(parsed.actionItems, maxItems),
+      decisions: normalizeStringItems(parsed.decisions, maxSecondaryItems),
+      openQuestions: normalizeStringItems(parsed.openQuestions, maxSecondaryItems),
+    };
   } catch {
-    return [];
+    return { actionItems: [], decisions: [], openQuestions: [] };
   }
+}
+
+export async function extractActionItemsFromTranscript(params: {
+  transcriptText: string;
+  meetingContext?: string;
+  maxItems?: number;
+}): Promise<string[]> {
+  const signals = await extractMeetingSignalsFromTranscript(params);
+  return signals.actionItems;
 }
 
 function parseFirstJsonObject(text: string): string | null {

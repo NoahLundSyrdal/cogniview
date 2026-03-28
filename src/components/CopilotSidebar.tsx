@@ -6,7 +6,67 @@ import InsightCard from './InsightCard';
 import MeetingControls from './MeetingControls';
 import FactCheckPanel from './FactCheckPanel';
 import AssistantCopilotChat from './AssistantCopilotChat';
-import type { FrameAnalysis, FactCheckResult, TranscriptSegment } from '@/types';
+import type { FrameAnalysis, FactCheckResult, MeetingSignal, TranscriptSegment } from '@/types';
+
+function normalizeSignalKey(text: string) {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function formatSignalTime(timestamp: number) {
+  return new Date(timestamp).toLocaleTimeString([], {
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
+const SCREEN_REQUIREMENT_RE =
+  /\b(due|deadline|required|required components|submit|submission|deliverable|assignment|rubric|guidelines|must|worth|points)\b/i;
+
+function ActionSignalSection({
+  title,
+  emptyState,
+  items,
+}: {
+  title: string;
+  emptyState: string;
+  items: MeetingSignal[];
+}) {
+  return (
+    <div className="rounded-lg border border-gray-800 bg-gray-950/70 px-3 py-3 space-y-2">
+      <div className="text-[10px] uppercase tracking-[0.2em] text-gray-500">{title}</div>
+      {items.length > 0 ? (
+        <div className="space-y-2">
+          {items.map((item) => (
+            <div
+              key={item.id}
+              className="rounded-lg border border-gray-800/80 bg-gray-900/70 px-3 py-2 space-y-1.5"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span
+                  className={`rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.16em] ${
+                    item.source === 'speech'
+                      ? 'bg-emerald-500/15 text-emerald-200'
+                      : 'bg-sky-500/15 text-sky-200'
+                  }`}
+                >
+                  {item.source === 'speech' ? 'Voice' : 'Screen'}
+                </span>
+                <span className="text-[10px] text-gray-500">{formatSignalTime(item.timestamp)}</span>
+              </div>
+              <p className="text-xs leading-relaxed text-gray-200">{item.text}</p>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="text-xs leading-relaxed text-gray-500">{emptyState}</p>
+      )}
+    </div>
+  );
+}
 
 interface Props {
   insights: FrameAnalysis[];
@@ -14,9 +74,9 @@ interface Props {
   isCapturing: boolean;
   isAnalyzing: boolean;
   isTranscribing: boolean;
-  allActionItems: string[];
-  liveNowSummary: string;
-  recentCommitments: string[];
+  actionSignals: MeetingSignal[];
+  decisionSignals: MeetingSignal[];
+  openQuestionSignals: MeetingSignal[];
   transcriptSegments: TranscriptSegment[];
   finalSummary: string | null;
   finalSummaryError: string | null;
@@ -43,9 +103,9 @@ export default function CopilotSidebar({
   isCapturing,
   isAnalyzing,
   isTranscribing,
-  allActionItems,
-  liveNowSummary,
-  recentCommitments,
+  actionSignals,
+  decisionSignals,
+  openQuestionSignals,
   transcriptSegments,
   finalSummary,
   finalSummaryError,
@@ -83,10 +143,66 @@ export default function CopilotSidebar({
     return () => cancelAnimationFrame(frameId);
   }, [finalSummary, finalSummaryError, isCapturing, isGeneratingSummary]);
 
+  const latestSuggestedQuestions = (() => {
+    if (!screenAnalysis?.suggestedQuestions?.length) return [];
+    const seen = new Set(openQuestionSignals.map((item) => normalizeSignalKey(item.text)));
+    const items: MeetingSignal[] = [];
+
+    screenAnalysis.suggestedQuestions.forEach((text, index) => {
+      const key = normalizeSignalKey(text);
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      items.push({
+        id: `screen-question-${screenAnalysis.timestamp}-${index}`,
+        text,
+        timestamp: screenAnalysis.timestamp,
+        source: 'vision',
+      });
+    });
+
+    return items;
+  })();
+
+  const screenRequirements = (() => {
+    const seen = new Set<string>();
+    const items: MeetingSignal[] = [];
+
+    [...insights]
+      .slice(-6)
+      .forEach((insight) => {
+        const candidates = [...insight.keyPoints];
+        if (SCREEN_REQUIREMENT_RE.test(insight.summary)) {
+          candidates.unshift(insight.summary);
+        }
+
+        candidates.forEach((text, index) => {
+          if (!SCREEN_REQUIREMENT_RE.test(text)) return;
+          const key = normalizeSignalKey(text);
+          if (!key || seen.has(key)) return;
+          seen.add(key);
+          items.push({
+            id: `screen-requirement-${insight.timestamp}-${index}`,
+            text,
+            timestamp: insight.timestamp,
+            source: 'vision',
+          });
+        });
+      });
+
+    return items.slice(-8).reverse();
+  })();
+
+  const actionCenterCount =
+    actionSignals.length +
+    decisionSignals.length +
+    screenRequirements.length +
+    openQuestionSignals.length +
+    latestSuggestedQuestions.length;
+
   const tabs: { id: Tab; label: string; count?: number }[] = [
     { id: 'insights', label: 'Insights', count: insights.length || undefined },
     { id: 'transcript', label: 'Transcript', count: transcriptSegments.length || undefined },
-    { id: 'actions', label: 'Actions', count: allActionItems.length || undefined },
+    { id: 'actions', label: 'Actions', count: actionCenterCount || undefined },
     { id: 'chat', label: 'Chat', count: chatMessageCount || undefined },
     { id: 'factCheck', label: 'Fact-check', count: factCheckResults.length || undefined },
   ];
@@ -202,35 +318,42 @@ export default function CopilotSidebar({
         {tab === 'actions' && (
           <ScrollArea className="h-full">
             <div className="p-3 space-y-3">
-              <div className="rounded-lg border border-gray-800 bg-gray-950/70 px-3 py-3 space-y-2">
-                <div className="text-[10px] uppercase tracking-[0.2em] text-gray-500">
-                  What is happening now
-                </div>
-                <p className="text-xs leading-relaxed text-gray-200 whitespace-pre-wrap">
-                  {liveNowSummary ||
-                    (isCapturing
-                      ? 'Listening and watching. Waiting for enough context to summarize this moment.'
-                      : 'Start capture to get a live summary of what is happening now.')}
-                </p>
-              </div>
-              <div className="rounded-lg border border-gray-800 bg-gray-950/70 px-3 py-3 space-y-2">
-                <div className="text-[10px] uppercase tracking-[0.2em] text-gray-500">
-                  New commitments (last 2 min)
-                </div>
-                {recentCommitments.length > 0 ? (
-                  <ul className="space-y-1.5 text-xs text-gray-200 list-disc pl-4">
-                    {recentCommitments.map((item) => (
-                      <li key={item} className="leading-relaxed">
-                        {item}
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="text-xs leading-relaxed text-gray-500">
-                    No new commitments detected.
-                  </p>
-                )}
-              </div>
+              <ActionSignalSection
+                title="Todos and deliverables"
+                emptyState={
+                  isCapturing
+                    ? 'Watching for deadlines, required deliverables, and concrete follow-up work from the screen or conversation.'
+                    : 'No concrete todos or deliverables were captured in this session.'
+                }
+                items={[...actionSignals].reverse().slice(0, 8)}
+              />
+              <ActionSignalSection
+                title="Decisions heard"
+                emptyState={
+                  isCapturing
+                    ? 'Listening for explicit approvals, chosen options, and changes in direction.'
+                    : 'No explicit decisions were captured in this session.'
+                }
+                items={[...decisionSignals].reverse().slice(0, 6)}
+              />
+              <ActionSignalSection
+                title="Deadlines and requirements on screen"
+                emptyState={
+                  isCapturing
+                    ? 'Watching for due dates, assignment requirements, and submission constraints on screen.'
+                    : 'No on-screen deadlines or requirements were captured in this session.'
+                }
+                items={screenRequirements}
+              />
+              <ActionSignalSection
+                title="Questions and prompts"
+                emptyState={
+                  isCapturing
+                    ? 'Watching for unresolved questions and useful prompts to ask next.'
+                    : 'No unresolved questions or prompts were captured in this session.'
+                }
+                items={[...openQuestionSignals, ...latestSuggestedQuestions].reverse().slice(0, 8)}
+              />
               <MeetingControls
                 isCapturing={isCapturing}
                 insights={insights}

@@ -24,6 +24,21 @@ export interface TranscriptSegment {
   durationSeconds?: number;
 }
 
+export type MeetingSignalSource = 'vision' | 'speech';
+
+export interface MeetingSignal {
+  id: string;
+  text: string;
+  timestamp: number;
+  source: MeetingSignalSource;
+}
+
+export interface MeetingSignalsPayload {
+  actionItems?: string[];
+  decisions?: string[];
+  openQuestions?: string[];
+}
+
 export interface MeetingState {
   isCapturing: boolean;
   isAnalyzing: boolean;
@@ -31,6 +46,9 @@ export interface MeetingState {
   messages: ChatMessage[];
   context: string;
   allActionItems: string[];
+  actionSignals: MeetingSignal[];
+  decisionSignals: MeetingSignal[];
+  openQuestionSignals: MeetingSignal[];
   transcriptSegments: TranscriptSegment[];
 }
 

@@ -12,6 +12,43 @@ from pydantic import BaseModel, Field
 MAX_INSIGHTS = 12
 MAX_TRANSCRIPT_SEGMENTS = 24
 MAX_ACTION_ITEMS = 18
+ITEM_DEDUPE_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "at",
+    "by",
+    "for",
+    "from",
+    "in",
+    "into",
+    "of",
+    "on",
+    "or",
+    "the",
+    "to",
+    "via",
+    "with",
+    "must",
+    "need",
+    "needs",
+    "should",
+    "please",
+    "complete",
+    "submit",
+    "review",
+    "prepare",
+    "ensure",
+    "include",
+    "including",
+    "write",
+    "draft",
+    "finalize",
+    "hand",
+    "turn",
+    "send",
+    "make",
+}
 REQUIRED_SECTION_HEADINGS = [
     "## Final Overview",
     "## What Was Shown",
@@ -56,12 +93,17 @@ class SummaryContext(BaseModel):
     commitments_text: str
     visible_actions_text: str
     notable_questions_text: str
+    candidate_action_items: list[str] = Field(default_factory=list)
 
 
 class SummaryReview(BaseModel):
     passes: bool
     feedback: str = ""
     revised_summary: str = ""
+
+
+class ActionItemsResponse(BaseModel):
+    actionItems: list[str] = Field(default_factory=list)
 
 
 def _clean_text(value: Any) -> str:
@@ -75,17 +117,14 @@ def _clean_items(values: Any, *, limit: int | None = None) -> list[str]:
         return []
 
     results: list[str] = []
-    seen: set[str] = set()
     for value in values:
         if not isinstance(value, str):
             continue
         clean = value.strip()
         if not clean:
             continue
-        key = clean.lower()
-        if key in seen:
+        if any(_is_near_duplicate_item(existing, clean) for existing in results):
             continue
-        seen.add(key)
         results.append(clean)
         if limit is not None and len(results) >= limit:
             break
@@ -94,6 +133,46 @@ def _clean_items(values: Any, *, limit: int | None = None) -> list[str]:
 
 def _normalize_summary_key(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9\s]", " ", text.lower())).strip()
+
+
+def _tokenize_item_text(text: str) -> list[str]:
+    return [
+        token
+        for token in _normalize_summary_key(text).split(" ")
+        if len(token) >= 2 and token not in ITEM_DEDUPE_STOPWORDS
+    ]
+
+
+def _item_similarity(left: str, right: str) -> float:
+    left_tokens = _tokenize_item_text(left)
+    right_tokens = _tokenize_item_text(right)
+    if not left_tokens or not right_tokens:
+        return 0.0
+
+    left_set = set(left_tokens)
+    right_set = set(right_tokens)
+    intersection = len(left_set & right_set)
+    union = len(left_set | right_set)
+    return intersection / union if union else 0.0
+
+
+def _is_near_duplicate_item(left: str, right: str) -> bool:
+    normalized_left = _normalize_summary_key(left)
+    normalized_right = _normalize_summary_key(right)
+
+    if not normalized_left or not normalized_right:
+        return False
+    if normalized_left == normalized_right:
+        return True
+    if (
+        (normalized_left in normalized_right or normalized_right in normalized_left)
+        and min(len(normalized_left), len(normalized_right))
+        / max(len(normalized_left), len(normalized_right))
+        >= 0.68
+    ):
+        return True
+
+    return _item_similarity(left, right) >= 0.74
 
 
 def _format_timestamp(timestamp_ms: int | None) -> str:
@@ -185,6 +264,23 @@ def _parse_review(raw_text: str, fallback_summary: str) -> SummaryReview:
     )
 
 
+def _parse_action_items_response(raw_text: str, fallback: list[str]) -> list[str]:
+    parsed = _parse_first_json_object(raw_text)
+    if not parsed:
+        return fallback
+
+    try:
+        payload = json.loads(parsed)
+    except json.JSONDecodeError:
+        return fallback
+
+    if not isinstance(payload, dict):
+        return fallback
+
+    action_items = _clean_items(payload.get("actionItems"), limit=5)
+    return action_items or fallback
+
+
 def _missing_required_sections(summary: str) -> list[str]:
     return [heading for heading in REQUIRED_SECTION_HEADINGS if heading not in summary]
 
@@ -235,6 +331,7 @@ async def build_summary_context(
     ]
 
     commitments = _clean_items(action_items, limit=MAX_ACTION_ITEMS)
+    candidate_action_items = _clean_items([*commitments, *visible_actions], limit=MAX_ACTION_ITEMS)
 
     return SummaryContext(
         duration_label=f"{duration} minutes" if duration else "unknown duration",
@@ -248,11 +345,51 @@ async def build_summary_context(
             f"- {item}" for item in _clean_items(notable_questions, limit=10)
         )
         or "- No unresolved questions were surfaced in the on-screen analysis.",
+        candidate_action_items=candidate_action_items,
     )
 
 
 @rt.function_node
-async def draft_final_summary(context: SummaryContext) -> str:
+async def consolidate_action_items(context: SummaryContext) -> list[str]:
+    if not context.candidate_action_items:
+        return []
+
+    consolidator = rt.agent_node(
+        "Meeting Summary Action Consolidator",
+        llm=_create_summary_llm(),
+        system_message=(
+            "You merge overlapping meeting todo items into a compact checklist. "
+            "Return valid JSON only in the shape {\"actionItems\":[\"...\"]}. "
+            "Merge items that refer to the same deliverable or deadline under different names."
+        ),
+    )
+    prompt = f"""Candidate action items:
+{chr(10).join(f"{index + 1}. {item}" for index, item in enumerate(context.candidate_action_items))}
+
+Visible timeline:
+{context.shown_timeline}
+
+Transcript timeline:
+{context.transcript_timeline}
+
+Merge overlapping tasks that refer to the same assignment, deliverable, or deadline.
+- Keep only real action items.
+- Prefer the clearest phrasing.
+- Return at most 5 action items.
+- If there are no true action items, return {{"actionItems":[]}}."""
+
+    result = await rt.call(consolidator, prompt)
+    return _parse_action_items_response(
+        result.text.strip(),
+        fallback=_clean_items(context.candidate_action_items, limit=5),
+    )
+
+
+@rt.function_node
+async def draft_final_summary(
+    context: SummaryContext,
+    consolidated_action_items: list[str],
+) -> str:
     writer = rt.agent_node(
         "Meeting Summary Writer",
         llm=_create_summary_llm(),
@@ -266,8 +403,16 @@ async def draft_final_summary(context: SummaryContext) -> str:
             "## Decisions And Commitments\n"
             "## Action Items\n"
             "## Open Questions\n"
-            "Do not invent owners, deadlines, or facts. If something is implied, use cautious wording."
+            "Do not invent owners, deadlines, facts, or todo items. "
+            "Some meetings have no action list; in that case say no concrete action items were identified. "
+            "Merge overlapping todos into a compact checklist instead of repeating near-identical tasks. "
+            "If something is implied, use cautious wording."
         ),
+    )
+    consolidated_actions_text = (
+        "\n".join(f"- {item}" for item in consolidated_action_items)
+        if consolidated_action_items
+        else "- No explicit commitments captured."
     )
     prompt = f"""Write the final summary for a completed meeting lasting {context.duration_label}.
 
@@ -277,8 +422,8 @@ Visible timeline:
 Transcript timeline:
 {context.transcript_timeline}
 
-Commitments and extracted action items:
-{context.commitments_text}
+Consolidated commitments and action items:
+{consolidated_actions_text}
 
 Visible action items from on-screen analysis:
 {context.visible_actions_text}
@@ -286,7 +431,9 @@ Visible action items from on-screen analysis:
 Outstanding or suggested questions:
 {context.notable_questions_text}
 
-Make the result feel like one coherent closing recap, not disconnected notes."""
+Make the result feel like one coherent closing recap, not disconnected notes.
+Only include todo items when the meeting clearly assigned or committed to follow-up work.
+Keep action items compact and deduplicated."""
 
     result = await rt.call(writer, prompt)
     return result.text.strip()
@@ -296,6 +443,7 @@ Make the result feel like one coherent closing recap, not disconnected notes."""
 async def review_final_summary(
     context: SummaryContext,
     draft_summary: str,
+    consolidated_action_items: list[str],
 ) -> SummaryReview:
     reviewer = rt.agent_node(
         "Meeting Summary Reviewer",
@@ -304,11 +452,18 @@ async def review_final_summary(
             "You review final meeting summaries for completeness and accuracy. "
             "Check whether the summary clearly covers what was shown, what was said, "
             "and what was decided or done. "
+            "Reject summaries that invent action items for meetings that did not clearly assign any. "
+            "Reject summaries that repeat the same todo in slightly different wording. "
             "Return valid JSON only with keys passes, feedback, revised_summary. "
             "revised_summary must always contain the full final markdown summary."
         ),
     )
     missing_sections = _missing_required_sections(draft_summary)
+    consolidated_actions_text = (
+        "\n".join(f"- {item}" for item in consolidated_action_items)
+        if consolidated_action_items
+        else "- No explicit commitments captured."
+    )
     prompt = f"""Review this meeting summary draft.
 
 Context to cover:
@@ -319,7 +474,7 @@ Transcript timeline:
 {context.transcript_timeline}
 
 Commitments:
-{context.commitments_text}
+{consolidated_actions_text}
 
 Visible action items:
 {context.visible_actions_text}
@@ -360,11 +515,20 @@ async def create_final_meeting_summary(
         action_items=action_items,
         duration=duration,
     )
-    draft_summary = await rt.call(draft_final_summary, context=context)
+    consolidated_action_items = await rt.call(
+        consolidate_action_items,
+        context=context,
+    )
+    draft_summary = await rt.call(
+        draft_final_summary,
+        context=context,
+        consolidated_action_items=consolidated_action_items,
+    )
     review = await rt.call(
         review_final_summary,
         context=context,
         draft_summary=draft_summary,
+        consolidated_action_items=consolidated_action_items,
     )
 
     candidate = (review.revised_summary or draft_summary).strip()
