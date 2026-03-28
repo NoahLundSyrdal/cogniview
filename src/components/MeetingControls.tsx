@@ -2,27 +2,34 @@
 
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
-import type { FrameAnalysis } from '@/types';
+import type { FrameAnalysis, TranscriptSegment } from '@/types';
 
 interface Props {
   insights: FrameAnalysis[];
   actionItems: string[];
+  transcriptSegments: TranscriptSegment[];
   startTime: number | null;
 }
 
-export default function MeetingControls({ insights, actionItems, startTime }: Props) {
+export default function MeetingControls({
+  insights,
+  actionItems,
+  transcriptSegments,
+  startTime,
+}: Props) {
   const [isExporting, setIsExporting] = useState(false);
   const [summary, setSummary] = useState<string | null>(null);
+  const hasMeetingData = insights.length > 0 || transcriptSegments.length > 0;
 
   const handleExport = async () => {
-    if (!insights.length) return;
+    if (!hasMeetingData) return;
     setIsExporting(true);
     try {
       const duration = startTime ? Math.round((Date.now() - startTime) / 60000) : undefined;
       const res = await fetch('/api/summarize', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ insights, actionItems, duration }),
+        body: JSON.stringify({ insights, actionItems, transcriptSegments, duration }),
       });
       const data = await res.json();
       setSummary(data.summary || null);
@@ -43,7 +50,7 @@ export default function MeetingControls({ insights, actionItems, startTime }: Pr
     URL.revokeObjectURL(url);
   };
 
-  if (!insights.length) return null;
+  if (!hasMeetingData) return null;
 
   return (
     <div className="mt-4 flex flex-col gap-2">

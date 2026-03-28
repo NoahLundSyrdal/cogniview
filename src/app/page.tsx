@@ -13,12 +13,15 @@ import type { FrameAnalysis, FactCheckResult } from '@/types';
 export default function Home() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [transcriptError, setTranscriptError] = useState<string | null>(null);
+  const [activeTranscriptJobs, setActiveTranscriptJobs] = useState(0);
   const [startTime, setStartTime] = useState<number | null>(null);
   const [isFactChecking, setIsFactChecking] = useState(false);
   const [factCheckError, setFactCheckError] = useState<string | null>(null);
   const [factCheckClaims, setFactCheckClaims] = useState<string[]>([]);
   const [factCheckResults, setFactCheckResults] = useState<FactCheckResult[]>([]);
   const latestAnalysisRef = useRef<FrameAnalysis | null>(null);
+  const transcriptQueueRef = useRef<Promise<void>>(Promise.resolve());
   const latestFrameRef = useRef<string | null>(null);
   const {
     isOpen: isSidebarDetached,
@@ -42,8 +45,11 @@ export default function Home() {
     messages,
     context,
     allActionItems,
+    transcriptSegments,
     addInsight,
     addMessage,
+    addTranscriptSegment,
+    getTranscriptSummary,
     getContextSummary,
     reset,
   } = useMeetingContext();
@@ -53,11 +59,21 @@ export default function Home() {
       latestFrameRef.current = frame;
       setIsAnalyzing(true);
       setAnalysisError(null);
+      const transcriptSummary = getTranscriptSummary();
+
       try {
         const res = await fetch('/api/analyze-frame', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ frame, previousContext: context }),
+          body: JSON.stringify({
+            frame,
+            previousContext: [
+              context,
+              transcriptSummary && `Recent transcript:\n${transcriptSummary}`,
+            ]
+              .filter(Boolean)
+              .join('\n\n'),
+          }),
         });
         const data = await res.json();
         if (!res.ok) {
@@ -73,10 +89,53 @@ export default function Home() {
       }
       setIsAnalyzing(false);
     },
-    [context, addInsight]
+    [context, addInsight, getTranscriptSummary]
   );
 
-  const { isCapturing, captureError, startCapture, stopCapture } = useScreenCapture(handleFrame);
+  const handleAudioChunk = useCallback(
+    async (audio: Blob) => {
+      transcriptQueueRef.current = transcriptQueueRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          setActiveTranscriptJobs((count) => count + 1);
+          setTranscriptError(null);
+
+          try {
+            const extension = audio.type.includes('ogg') ? 'ogg' : 'webm';
+            const formData = new FormData();
+            formData.append('file', audio, `meeting-audio-${Date.now()}.${extension}`);
+
+            const res = await fetch('/api/transcribe-audio', {
+              method: 'POST',
+              body: formData,
+            });
+            const data = await res.json();
+
+            if (!res.ok) {
+              setTranscriptError(data.error || `Audio transcription failed (HTTP ${res.status})`);
+              return;
+            }
+
+            if (data.text?.trim()) {
+              addTranscriptSegment({ text: data.text });
+            }
+          } catch (err) {
+            console.error('Audio transcription failed:', err);
+            setTranscriptError('Network error while transcribing audio.');
+          } finally {
+            setActiveTranscriptJobs((count) => Math.max(0, count - 1));
+          }
+        });
+
+      await transcriptQueueRef.current;
+    },
+    [addTranscriptSegment]
+  );
+
+  const { isCapturing, captureError, startCapture, stopCapture } = useScreenCapture({
+    onFrame: handleFrame,
+    onAudioChunk: handleAudioChunk,
+  });
 
   const handleStart = useCallback(async () => {
     const sidebarWindowPromise = openSidebarWindow().catch((error) => {
@@ -87,6 +146,9 @@ export default function Home() {
     reset();
     setStartTime(null);
     setAnalysisError(null);
+    setTranscriptError(null);
+    setActiveTranscriptJobs(0);
+    transcriptQueueRef.current = Promise.resolve();
     latestFrameRef.current = null;
     setFactCheckError(null);
     setFactCheckClaims([]);
@@ -151,6 +213,7 @@ export default function Home() {
             message,
             meetingContext: getContextSummary(),
             screenAnalysis: latestAnalysisRef.current,
+            transcriptContext: getTranscriptSummary(),
           }),
         });
         const data = await res.json();
@@ -164,15 +227,17 @@ export default function Home() {
         addMessage({ role: 'assistant', content: 'Network error. Please try again.' });
       }
     },
-    [addMessage, getContextSummary]
+    [addMessage, getContextSummary, getTranscriptSummary]
   );
 
   const sidebarProps = {
     insights,
     messages,
     isCapturing,
-    isAnalyzing,
+    isAnalyzing: isAnalyzing || activeTranscriptJobs > 0,
+    isTranscribing: activeTranscriptJobs > 0,
     allActionItems,
+    transcriptSegments,
     onSendMessage: handleSendMessage,
     startTime,
     factCheckClaims,
@@ -201,8 +266,10 @@ export default function Home() {
             <ScreenCapture
               isCapturing={isCapturing}
               isAnalyzing={isAnalyzing}
+              isTranscribing={activeTranscriptJobs > 0}
               captureError={captureError}
               analysisError={analysisError}
+              transcriptError={transcriptError}
               onStart={handleStart}
               onStop={handleStop}
             />
@@ -212,6 +279,7 @@ export default function Home() {
             <div className="relative z-10 mt-10 flex gap-6 text-center">
               {[
                 { label: 'Frames analyzed', value: insights.length },
+                { label: 'Transcripts', value: transcriptSegments.length },
                 { label: 'Action items', value: allActionItems.length },
                 { label: 'Messages', value: messages.length },
               ].map(({ label, value }) => (

@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 
 export async function POST(req: NextRequest) {
   try {
-    const { message, meetingContext, screenAnalysis } = await req.json();
+    const { message, meetingContext, screenAnalysis, transcriptContext } = await req.json();
 
     if (!message) {
       return NextResponse.json({ error: 'No message provided' }, { status: 400 });
@@ -21,6 +21,9 @@ ${screenContext}
 
 Meeting history so far:
 ${meetingContext || 'Meeting just started.'}
+
+Recent spoken transcript:
+${transcriptContext || 'No transcript available yet.'}
 
 Your role:
 - Answer questions about what's being presented on screen

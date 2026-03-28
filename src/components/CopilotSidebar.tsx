@@ -8,14 +8,16 @@ import InsightCard from './InsightCard';
 import ActionItems from './ActionItems';
 import MeetingControls from './MeetingControls';
 import FactCheckPanel from './FactCheckPanel';
-import type { FrameAnalysis, ChatMessage, FactCheckResult } from '@/types';
+import type { FrameAnalysis, ChatMessage, FactCheckResult, TranscriptSegment } from '@/types';
 
 interface Props {
   insights: FrameAnalysis[];
   messages: ChatMessage[];
   isCapturing: boolean;
   isAnalyzing: boolean;
+  isTranscribing: boolean;
   allActionItems: string[];
+  transcriptSegments: TranscriptSegment[];
   onSendMessage: (msg: string) => Promise<void>;
   startTime: number | null;
   factCheckClaims: string[];
@@ -25,14 +27,16 @@ interface Props {
   onRunFactCheck: () => Promise<void>;
 }
 
-type Tab = 'insights' | 'actions' | 'chat' | 'factCheck';
+type Tab = 'insights' | 'transcript' | 'actions' | 'chat' | 'factCheck';
 
 export default function CopilotSidebar({
   insights,
   messages,
   isCapturing,
   isAnalyzing,
+  isTranscribing,
   allActionItems,
+  transcriptSegments,
   onSendMessage,
   startTime,
   factCheckClaims,
@@ -70,6 +74,7 @@ export default function CopilotSidebar({
 
   const tabs: { id: Tab; label: string; count?: number }[] = [
     { id: 'insights', label: 'Insights', count: insights.length || undefined },
+    { id: 'transcript', label: 'Transcript', count: transcriptSegments.length || undefined },
     { id: 'actions', label: 'Actions', count: allActionItems.length || undefined },
     { id: 'chat', label: 'Chat', count: messages.length || undefined },
     { id: 'factCheck', label: 'Fact-check', count: factCheckResults.length || undefined },
@@ -81,7 +86,7 @@ export default function CopilotSidebar({
       <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <span className="text-sm font-semibold text-gray-100">Copilot</span>
-          {isAnalyzing && (
+          {(isAnalyzing || isTranscribing) && (
             <span className="flex gap-0.5">
               {[0, 1, 2].map((i) => (
                 <span
@@ -149,14 +154,48 @@ export default function CopilotSidebar({
           </ScrollArea>
         )}
 
+        {tab === 'transcript' && (
+          <ScrollArea className="h-full">
+            <div className="p-3 space-y-3">
+              {isCapturing && (
+                <div className="rounded-lg border border-indigo-500/20 bg-indigo-500/10 px-3 py-2 text-[11px] text-indigo-200">
+                  {isTranscribing ? 'Listening live. New transcript text should land every ~5 seconds.' : 'Listening live.'}
+                </div>
+              )}
+              {transcriptSegments.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12 text-center gap-3">
+                  <span className="text-3xl opacity-40">🎙</span>
+                  <p className="text-sm text-gray-500">
+                    {isCapturing
+                      ? 'Listening for meeting audio...'
+                      : 'Start capture to transcribe audio'}
+                  </p>
+                </div>
+              ) : (
+                [...transcriptSegments].reverse().map((segment) => (
+                  <div
+                    key={segment.id}
+                    className="rounded-lg border border-gray-800 bg-gray-950/70 px-3 py-2.5 space-y-1.5"
+                  >
+                    <div className="text-[10px] uppercase tracking-[0.2em] text-gray-500">
+                      {new Date(segment.timestamp).toLocaleTimeString()}
+                    </div>
+                    <p className="text-xs leading-relaxed text-gray-200">{segment.text}</p>
+                  </div>
+                ))
+              )}
+            </div>
+          </ScrollArea>
+        )}
+
         {tab === 'actions' && (
           <ScrollArea className="h-full">
             <div className="p-3 space-y-3">
               <ActionItems items={allActionItems} />
               <MeetingControls
-                isCapturing={isCapturing}
                 insights={insights}
                 actionItems={allActionItems}
+                transcriptSegments={transcriptSegments}
                 startTime={startTime}
               />
             </div>
